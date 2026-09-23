@@ -2,7 +2,7 @@
 //!
 //! Message format, envelopes (JWS, anoncrypt and authcrypt JWE), the crypto
 //! behind them and DID resolution. Nothing here knows about HTTP, storage or
-//! mediation, so both the node and the wallet can use it.
+//! mediation, so both the mediator and the wallet can use it.
 //!
 //! ```no_run
 //! # async fn demo() -> almena_didcomm::Result<()> {

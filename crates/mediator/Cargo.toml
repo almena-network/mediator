@@ -1,13 +1,13 @@
 [package]
-name = "almena-node"
-description = "Almena Network node: the server side of the platform (DIDComm v2.0 mediator)"
+name = "almena-mediator"
+description = "Almena Network mediator: the server side of the platform (DIDComm Messaging v2.0)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
 [[bin]]
-name = "almena-node"
+name = "almena-mediator"
 path = "src/main.rs"
 
 [lints]

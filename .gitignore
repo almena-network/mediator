@@ -1,5 +1,5 @@
 /target
 .env
 .DS_Store
-# Local node keys (task dev)
+# Local mediator keys (task dev)
 /data

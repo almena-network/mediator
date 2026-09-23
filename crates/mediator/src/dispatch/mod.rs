@@ -1,5 +1,5 @@
-//! The DIDComm side of the node: unpacks what arrives at `/didcomm`, runs the
-//! protocols addressed to the node itself, queues `forward` payloads and packs
+//! The DIDComm side of the mediator: unpacks what arrives at `/didcomm`, runs the
+//! protocols addressed to the mediator itself, queues `forward` payloads and packs
 //! the replies.
 
 pub mod live;
@@ -73,7 +73,7 @@ pub struct Mediator {
     store: Arc<dyn Store>,
     limits: Limits,
     live: LiveHub,
-    /// Outbound traffic to other nodes; `None` turns federation off.
+    /// Outbound traffic to other mediators; `None` turns federation off.
     transport: Option<Arc<dyn Transport>>,
 }
 
@@ -158,7 +158,7 @@ impl Mediator {
         let (message, meta) = unpack(packed, &self.resolver, self.identity.secrets()).await?;
         if !meta.encrypted {
             return Err(almena_didcomm::Error::Malformed(
-                "the node accepts encrypted messages only".into(),
+                "the mediator accepts encrypted messages only".into(),
             )
             .into());
         }
@@ -240,7 +240,7 @@ impl Mediator {
             .map_or(Outcome::Accepted, Outcome::Reply)
     }
 
-    /// Authcrypts `reply` from the node to `recipient`, never wrapped for the
+    /// Authcrypts `reply` from the mediator to `recipient`, never wrapped for the
     /// recipient's mediators: it goes back on the connection it came from.
     async fn pack_reply(&self, reply: Message, recipient: &str) -> Option<String> {
         let sender = recipient;
@@ -290,7 +290,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ping_with_return_route_gets_a_response_on_every_curve_the_node_has() {
+    async fn ping_with_return_route_gets_a_response_on_every_curve_the_mediator_has() {
         let mediator = mediator();
         for curve in [Curve::X25519, Curve::P384] {
             let wallet = Wallet::new(curve);
@@ -421,8 +421,8 @@ mod tests {
         assert_eq!(response.body["updated"][0]["result"], "success");
     }
 
-    /// Alice → (forward via the node) → Bob, as Alice's wallet would send it.
-    async fn send_via_node(
+    /// Alice → (forward via the mediator) → Bob, as Alice's wallet would send it.
+    async fn send_via_mediator(
         mediator: &Mediator,
         alice: &Wallet,
         bob: &Wallet,
@@ -444,23 +444,23 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(packed.forwarded, "Bob's DID routes through the node");
+        assert!(packed.forwarded, "Bob's DID routes through the mediator");
         assert_eq!(
             packed.service_uri.as_deref(),
-            Some("https://node.example.com/didcomm")
+            Some("https://mediator.example.com/didcomm")
         );
         mediator.receive(&packed.message, None).await
     }
 
     #[tokio::test]
-    async fn a_message_travels_from_alice_to_bob_through_the_node() {
+    async fn a_message_travels_from_alice_to_bob_through_the_mediator() {
         let mediator = mediator();
         let bob = Wallet::mediated_by(&mediator.identity().did);
         let alice = Wallet::new(Curve::X25519);
         mediate(&mediator, &bob).await;
 
         assert_eq!(
-            send_via_node(&mediator, &alice, &bob, "hi Bob")
+            send_via_mediator(&mediator, &alice, &bob, "hi Bob")
                 .await
                 .unwrap(),
             Outcome::Accepted
@@ -529,8 +529,10 @@ mod tests {
             json!({"updates": [{"recipient_did": bob_other.did, "action": "add"}]}),
         )
         .await;
-        send_via_node(&mediator, &alice, &bob, "one").await.unwrap();
-        send_via_node(&mediator, &alice, &bob_other, "two")
+        send_via_mediator(&mediator, &alice, &bob, "one")
+            .await
+            .unwrap();
+        send_via_mediator(&mediator, &alice, &bob_other, "two")
             .await
             .unwrap();
 
@@ -710,11 +712,11 @@ mod tests {
         let alice = Wallet::new(Curve::X25519);
         mediate(&mediator, &bob).await;
         for i in 0..crate::testing::LIMITS.queue.max_messages {
-            send_via_node(&mediator, &alice, &bob, &i.to_string())
+            send_via_mediator(&mediator, &alice, &bob, &i.to_string())
                 .await
                 .unwrap();
         }
-        let err = send_via_node(&mediator, &alice, &bob, "one too many")
+        let err = send_via_mediator(&mediator, &alice, &bob, "one too many")
             .await
             .unwrap_err();
         assert!(matches!(err, ReceiveError::QueueFull));
@@ -725,7 +727,7 @@ mod tests {
         let mediator = mediator();
         let bob = Wallet::mediated_by(&mediator.identity().did);
         let alice = Wallet::new(Curve::X25519);
-        let err = send_via_node(&mediator, &alice, &bob, "hi")
+        let err = send_via_mediator(&mediator, &alice, &bob, "hi")
             .await
             .unwrap_err();
         assert!(matches!(err, ReceiveError::UnknownRecipient));
@@ -754,21 +756,21 @@ mod tests {
 
     // ---- Federation ----
 
-    use crate::testing::{InProcess, node};
+    use crate::testing::{InProcess, mediator_at};
     use almena_didcomm::did::{
         ChainResolver as Chain, LocalResolver as Local, StaticResolver as Static,
     };
 
-    /// Alice hands a message for Bob (mediated at B) to her own node A,
+    /// Alice hands a message for Bob (mediated at B) to her own mediator A,
     /// which relays it to B.
     #[tokio::test]
-    async fn a_node_relays_forwards_to_the_recipients_node() {
+    async fn a_mediator_relays_forwards_to_the_recipients_mediator() {
         let net = Arc::new(InProcess::default());
-        let a = node(
+        let a = mediator_at(
             "https://a.example",
             Some(net.clone() as Arc<dyn crate::transport::Transport>),
         );
-        let b = node(
+        let b = mediator_at(
             "https://b.example",
             Some(net.clone() as Arc<dyn crate::transport::Transport>),
         );
@@ -834,8 +836,8 @@ mod tests {
     #[tokio::test]
     async fn without_federation_foreign_recipients_are_unknown() {
         let net = Arc::new(InProcess::default());
-        let a = node("https://a.example", None);
-        let b = node(
+        let a = mediator_at("https://a.example", None);
+        let b = mediator_at(
             "https://b.example",
             Some(net.clone() as Arc<dyn crate::transport::Transport>),
         );
@@ -853,9 +855,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_route_back_to_this_node_is_not_followed() {
+    async fn a_route_back_to_this_mediator_is_not_followed() {
         let net = Arc::new(InProcess::default());
-        let a = node(
+        let a = mediator_at(
             "https://a.example",
             Some(net.clone() as Arc<dyn crate::transport::Transport>),
         );

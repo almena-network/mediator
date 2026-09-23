@@ -1,4 +1,4 @@
-//! Outbound traffic to other nodes: fetching `did:web` documents and posting
+//! Outbound traffic to other mediators: fetching `did:web` documents and posting
 //! DIDComm messages.
 //!
 //! Every URL here comes from a DID document, i.e. from strangers, so the HTTP
@@ -48,7 +48,7 @@ impl HttpTransport {
             }
         });
         let mut builder = reqwest::Client::builder()
-            .user_agent(concat!("almena-node/", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!("almena-mediator/", env!("CARGO_PKG_VERSION")))
             .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(15))
             .redirect(redirect);
@@ -258,8 +258,8 @@ mod tests {
     #[test]
     fn urls_are_checked() {
         let strict = HttpTransport::new(false).unwrap();
-        assert!(strict.check("https://node.example.com/didcomm").is_ok());
-        assert!(strict.check("http://node.example.com/didcomm").is_err());
+        assert!(strict.check("https://mediator.example.com/didcomm").is_ok());
+        assert!(strict.check("http://mediator.example.com/didcomm").is_err());
         assert!(strict.check("https://169.254.169.254/latest").is_err());
         assert!(strict.check("https://[::1]/x").is_err());
         let insecure = HttpTransport::new(true).unwrap();

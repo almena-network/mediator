@@ -1,4 +1,4 @@
-//! The node's own DIDComm identity: the `did:web` of its public origin, its
+//! The mediator's own DIDComm identity: the `did:web` of its public origin, its
 //! keys and the DID document it serves at `/.well-known/did.json`.
 
 use std::fs;
@@ -17,7 +17,7 @@ pub const DIDCOMM_PATH: &str = "/didcomm";
 /// Path of the DIDComm WebSocket endpoint, relative to the public origin.
 pub const WS_PATH: &str = "/ws";
 
-/// On-disk form of the node's private keys.
+/// On-disk form of the mediator's private keys.
 #[derive(Serialize, Deserialize)]
 struct KeyFile {
     /// Signing (`authentication`).
@@ -81,7 +81,7 @@ impl Keys {
     }
 }
 
-/// The node's DID, DID document and private keys.
+/// The mediator's DID, DID document and private keys.
 pub struct Identity {
     pub did: String,
     pub document: DidDocument,
@@ -94,12 +94,12 @@ impl Identity {
     pub fn load_or_create(path: &Path, public_url: &str) -> Result<Self> {
         let keys = if path.exists() {
             Keys::read(path)
-                .with_context(|| format!("reading node keys from {}", path.display()))?
+                .with_context(|| format!("reading mediator keys from {}", path.display()))?
         } else {
             let keys = Keys::generate()?;
             keys.write(path)
-                .with_context(|| format!("writing node keys to {}", path.display()))?;
-            tracing::info!(path = %path.display(), "generated new node keys");
+                .with_context(|| format!("writing mediator keys to {}", path.display()))?;
+            tracing::info!(path = %path.display(), "generated new mediator keys");
             keys
         };
         Self::new(keys, public_url)
@@ -171,10 +171,10 @@ mod tests {
     fn keys_are_created_once_and_reused() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nested/keys.json");
-        let first = Identity::load_or_create(&path, "https://node.example.com").unwrap();
-        let second = Identity::load_or_create(&path, "https://node.example.com").unwrap();
+        let first = Identity::load_or_create(&path, "https://mediator.example.com").unwrap();
+        let second = Identity::load_or_create(&path, "https://mediator.example.com").unwrap();
         assert_eq!(first.document, second.document);
-        assert_eq!(first.did, "did:web:node.example.com");
+        assert_eq!(first.did, "did:web:mediator.example.com");
     }
 
     #[cfg(unix)]
@@ -183,7 +183,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("keys.json");
-        Identity::load_or_create(&path, "https://node.example.com").unwrap();
+        Identity::load_or_create(&path, "https://mediator.example.com").unwrap();
         let mode = fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
     }
@@ -205,6 +205,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("keys.json");
         fs::write(&path, "{}").unwrap();
-        assert!(Identity::load_or_create(&path, "https://node.example.com").is_err());
+        assert!(Identity::load_or_create(&path, "https://mediator.example.com").is_err());
     }
 }

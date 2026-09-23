@@ -87,7 +87,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "almena-node"
+name = "almena-mediator"
 version = "0.1.0"
 dependencies = [
  "almena-didcomm",

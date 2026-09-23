@@ -7,8 +7,8 @@ use almena_didcomm::did::{ChainResolver, LocalResolver, StaticResolver};
 use almena_didcomm::{Curve, InMemorySecrets, Message, PackOptions, SecretKey, unpack};
 use serde_json::json;
 
+use crate::dispatch::{Limits, Mediator, Outcome};
 use crate::identity::Identity;
-use crate::mediator::{Limits, Mediator, Outcome};
 use crate::store::{MemoryStore, QueueLimits, Store};
 
 pub const LIMITS: Limits = Limits {
@@ -20,15 +20,15 @@ pub const LIMITS: Limits = Limits {
     max_recipient_dids: 3,
 };
 
-/// A mediator at `https://node.example.com` with an empty in-memory store.
+/// A mediator at `https://mediator.example.com` with an empty in-memory store.
 pub fn mediator() -> Mediator {
     mediator_on(Arc::new(MemoryStore::new()))
 }
 
-/// A mediator at `https://node.example.com` on `store`.
+/// A mediator at `https://mediator.example.com` on `store`.
 pub fn mediator_on(store: Arc<dyn Store>) -> Mediator {
     Mediator::new(
-        Identity::ephemeral("https://node.example.com").unwrap(),
+        Identity::ephemeral("https://mediator.example.com").unwrap(),
         store,
         LIMITS,
         None,
@@ -74,23 +74,23 @@ impl Wallet {
         Self { did, secrets }
     }
 
-    pub fn resolver(node: &Identity) -> ChainResolver {
+    pub fn resolver(mediator: &Identity) -> ChainResolver {
         ChainResolver::new(vec![
-            Arc::new(StaticResolver::new([node.document.clone()])),
+            Arc::new(StaticResolver::new([mediator.document.clone()])),
             Arc::new(LocalResolver::new()),
         ])
     }
 
-    /// Encrypts `message` to the node, authcrypt unless `anonymous`.
-    pub async fn send(&self, node: &Identity, message: Message, anonymous: bool) -> String {
+    /// Encrypts `message` to the mediator, authcrypt unless `anonymous`.
+    pub async fn send(&self, mediator: &Identity, message: Message, anonymous: bool) -> String {
         let from = (!anonymous).then_some(self.did.as_str());
         message
-            .to([node.did.as_str()])
+            .to([mediator.did.as_str()])
             .pack_encrypted(
-                &node.did,
+                &mediator.did,
                 from,
                 None,
-                &Self::resolver(node),
+                &Self::resolver(mediator),
                 &self.secrets,
                 PackOptions::default(),
             )
@@ -99,13 +99,16 @@ impl Wallet {
             .message
     }
 
-    /// Opens a reply from the node and checks it is authcrypted by the node.
-    pub async fn open(&self, node: &Identity, reply: &str) -> Message {
-        let (message, meta) = unpack(reply, &Self::resolver(node), &self.secrets)
+    /// Opens a reply from the mediator and checks it is authcrypted by the mediator.
+    pub async fn open(&self, mediator: &Identity, reply: &str) -> Message {
+        let (message, meta) = unpack(reply, &Self::resolver(mediator), &self.secrets)
             .await
             .unwrap();
-        assert!(meta.authenticated, "replies are authcrypted by the node");
-        assert_eq!(message.from.as_deref(), Some(node.did.as_str()));
+        assert!(
+            meta.authenticated,
+            "replies are authcrypted by the mediator"
+        );
+        assert_eq!(message.from.as_deref(), Some(mediator.did.as_str()));
         message
     }
 
@@ -128,7 +131,7 @@ impl Wallet {
 }
 
 /// A mediator at `public_url` on its own in-memory store.
-pub fn node(
+pub fn mediator_at(
     public_url: &str,
     transport: Option<Arc<dyn crate::transport::Transport>>,
 ) -> Arc<Mediator> {
@@ -144,27 +147,29 @@ pub fn node(
 /// this process, by origin.
 #[derive(Default)]
 pub struct InProcess {
-    nodes: std::sync::Mutex<std::collections::HashMap<String, std::sync::Weak<Mediator>>>,
+    mediators: std::sync::Mutex<std::collections::HashMap<String, std::sync::Weak<Mediator>>>,
 }
 
 impl InProcess {
     pub fn add(&self, origin: &str, mediator: &Arc<Mediator>) {
-        self.nodes
+        self.mediators
             .lock()
             .unwrap()
             .insert(origin.to_owned(), Arc::downgrade(mediator));
     }
 
     fn find(&self, url: &str) -> anyhow::Result<(String, Arc<Mediator>)> {
-        let nodes = self.nodes.lock().unwrap();
-        let (origin, node) = nodes
+        let mediators = self.mediators.lock().unwrap();
+        let (origin, mediator) = mediators
             .iter()
             .find(|(origin, _)| url.starts_with(origin.as_str()))
-            .ok_or_else(|| anyhow::anyhow!("no node at {url}"))?;
+            .ok_or_else(|| anyhow::anyhow!("no mediator at {url}"))?;
         let path = url[origin.len()..].to_owned();
         Ok((
             path,
-            node.upgrade().ok_or_else(|| anyhow::anyhow!("node gone"))?,
+            mediator
+                .upgrade()
+                .ok_or_else(|| anyhow::anyhow!("mediator gone"))?,
         ))
     }
 }
@@ -172,15 +177,15 @@ impl InProcess {
 #[async_trait::async_trait]
 impl crate::transport::Transport for InProcess {
     async fn get_json(&self, url: &str) -> anyhow::Result<serde_json::Value> {
-        let (path, node) = self.find(url)?;
+        let (path, mediator) = self.find(url)?;
         anyhow::ensure!(path == "/.well-known/did.json", "not found: {url}");
-        Ok(node.identity().document.to_json())
+        Ok(mediator.identity().document.to_json())
     }
 
     async fn post_didcomm(&self, url: &str, message: &str) -> anyhow::Result<()> {
-        let (path, node) = self.find(url)?;
+        let (path, mediator) = self.find(url)?;
         anyhow::ensure!(path == crate::identity::DIDCOMM_PATH, "not found: {url}");
-        node.receive(message, None).await?;
+        mediator.receive(message, None).await?;
         Ok(())
     }
 }

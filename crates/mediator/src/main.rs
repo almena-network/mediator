@@ -2,11 +2,11 @@ use std::sync::Arc;
 
 use std::net::SocketAddr;
 
-use almena_node::identity::Identity;
-use almena_node::mediator::{Limits, Mediator};
-use almena_node::store::{self, QueueLimits};
-use almena_node::transport::{HttpTransport, Transport};
-use almena_node::{AppState, Config, config::LogFormat, router};
+use almena_mediator::dispatch::{Limits, Mediator};
+use almena_mediator::identity::Identity;
+use almena_mediator::store::{self, QueueLimits};
+use almena_mediator::transport::{HttpTransport, Transport};
+use almena_mediator::{AppState, Config, config::LogFormat, router};
 use anyhow::Result;
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
@@ -63,7 +63,7 @@ async fn main() -> Result<()> {
     };
 
     let listener = TcpListener::bind(config.bind).await?;
-    tracing::info!(addr = %listener.local_addr()?, %did, version = env!("CARGO_PKG_VERSION"), "almena node listening");
+    tracing::info!(addr = %listener.local_addr()?, %did, version = env!("CARGO_PKG_VERSION"), "almena mediator listening");
 
     axum::serve(
         listener,
@@ -72,11 +72,11 @@ async fn main() -> Result<()> {
     .with_graceful_shutdown(shutdown_signal())
     .await?;
 
-    tracing::info!("almena node stopped");
+    tracing::info!("almena mediator stopped");
     Ok(())
 }
 
-/// `almena-node healthcheck`: exits 0 if `/health` answers 200. Used by the
+/// `almena-mediator healthcheck`: exits 0 if `/health` answers 200. Used by the
 /// container healthcheck, since the runtime image ships no curl.
 fn healthcheck(config: &Config) -> Result<()> {
     use std::io::{Read, Write};

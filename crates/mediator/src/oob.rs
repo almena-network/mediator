@@ -1,9 +1,9 @@
-//! Out-of-Band 2.0 invitation to use this node as a mediator.
+//! Out-of-Band 2.0 invitation to use this mediator.
 //!
-//! A wallet that scans the invitation (as a URL or QR code) learns the node's
+//! A wallet that scans the invitation (as a URL or QR code) learns the mediator's
 //! DID, resolves it, and sends `mediate-request` with the invitation `id` as
 //! `pthid`. The invitation is the same on every request and across restarts:
-//! its `id` derives from the node's DID, so a printed QR code keeps working.
+//! its `id` derives from the mediator's DID, so a printed QR code keeps working.
 
 use almena_didcomm::{Message, b64};
 use serde_json::json;
@@ -14,10 +14,10 @@ use crate::identity::Identity;
 pub const INVITATION: &str = "https://didcomm.org/out-of-band/2.0/invitation";
 /// Path of the human-readable page the invitation URL points at.
 pub const OOB_PATH: &str = "/oob";
-/// Goal code of the node's invitation.
+/// Goal code of the mediator's invitation.
 pub const GOAL_CODE: &str = "request-mediate";
 
-/// The node's mediation invitation.
+/// The mediator's mediation invitation.
 pub fn invitation(identity: &Identity) -> Message {
     let digest = Sha256::digest(identity.did.as_bytes());
     let id: String = digest[..16].iter().map(|b| format!("{b:02x}")).collect();
@@ -25,7 +25,7 @@ pub fn invitation(identity: &Identity) -> Message {
         INVITATION,
         json!({
             "goal_code": GOAL_CODE,
-            "goal": "Use this node as your DIDComm mediator",
+            "goal": "Use this mediator for your DIDComm messages",
             "accept": ["didcomm/v2"],
         }),
     )
@@ -54,14 +54,14 @@ pub fn page(did: &str, url: &str) -> String {
         r#"<!doctype html>
 <html lang="en">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Almena node</title>
+<title>Almena mediator</title>
 <style>body{{font-family:system-ui,sans-serif;max-width:40rem;margin:3rem auto;padding:0 1rem;line-height:1.5}}code{{word-break:break-all}}</style></head>
 <body>
-<h1>Almena node</h1>
-<p>This is an invitation to use this node as your mediator on Almena Network.
+<h1>Almena mediator</h1>
+<p>This is an invitation to use this mediator on Almena Network.
 Open it with the Almena wallet: scan it as a QR code or paste this link into the app.</p>
 <p><a href="{url}">Invitation link</a></p>
-<p>Node DID: <code>{did}</code></p>
+<p>Mediator DID: <code>{did}</code></p>
 </body></html>
 "#,
         url = escape(url),
@@ -75,13 +75,13 @@ mod tests {
 
     #[test]
     fn invitation_is_stable_and_round_trips_through_the_url() {
-        let identity = Identity::ephemeral("https://node.example.com").unwrap();
+        let identity = Identity::ephemeral("https://mediator.example.com").unwrap();
         let first = invitation(&identity);
         assert_eq!(first, invitation(&identity));
         assert_eq!(first.id.len(), 32);
-        assert_eq!(first.from.as_deref(), Some("did:web:node.example.com"));
+        assert_eq!(first.from.as_deref(), Some("did:web:mediator.example.com"));
 
-        let url = invitation_url("https://node.example.com", &first);
+        let url = invitation_url("https://mediator.example.com", &first);
         let encoded = url.split_once("?_oob=").unwrap().1;
         let decoded: Message = serde_json::from_slice(&b64::decode(encoded).unwrap()).unwrap();
         assert_eq!(decoded, first);

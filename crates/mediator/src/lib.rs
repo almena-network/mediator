@@ -1,8 +1,8 @@
-//! Almena Network node: a DIDComm Messaging v2.0 mediator.
+//! Almena Network mediator (DIDComm Messaging v2.0).
 
 pub mod config;
+pub mod dispatch;
 pub mod identity;
-pub mod mediator;
 pub mod oob;
 pub mod routes;
 pub mod store;

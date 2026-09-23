@@ -1,9 +1,9 @@
-//! End-to-end check of a running node, playing two wallets: Bob finds the
-//! node through its invitation and gets mediation, Alice sends him messages
-//! through the node, Bob picks them up over HTTP and live over a WebSocket.
+//! End-to-end check of a running mediator, playing two wallets: Bob finds the
+//! mediator through its invitation and gets mediation, Alice sends him messages
+//! through the mediator, Bob picks them up over HTTP and live over a WebSocket.
 //!
 //! ```text
-//! cargo run -p almena-node --example smoke -- http://localhost:8080
+//! cargo run -p almena-mediator --example smoke -- http://localhost:8080
 //! ```
 
 use almena_didcomm::did::peer::{Purpose, peer2};
@@ -43,14 +43,14 @@ impl Wallet {
     }
 }
 
-struct Node {
+struct Mediator {
     http: reqwest::Client,
     base: String,
     doc: DidDocument,
     resolver: ChainResolver,
 }
 
-impl Node {
+impl Mediator {
     async fn post(&self, url: &str, body: String) -> Result<(u16, String)> {
         let response = self
             .http
@@ -104,7 +104,7 @@ async fn main() -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let http = reqwest::Client::new();
 
-    println!("1. Node DID document ({base}/.well-known/did.json)");
+    println!("1. Mediator DID document ({base}/.well-known/did.json)");
     let doc_json: Value = http
         .get(format!("{base}/.well-known/did.json"))
         .send()
@@ -112,14 +112,14 @@ async fn main() -> Result<()> {
         .error_for_status()?
         .json()
         .await
-        .context("reading the node's DID document")?;
+        .context("reading the mediator's DID document")?;
     let doc = DidDocument::from_json(&doc_json)?;
-    println!("  node DID: {}", doc.id);
+    println!("  mediator DID: {}", doc.id);
     let resolver = ChainResolver::new(vec![
         Arc::new(StaticResolver::new([doc.clone()])),
         Arc::new(LocalResolver::new()),
     ]);
-    let node = Node {
+    let mediator = Mediator {
         http,
         base,
         doc,
@@ -129,21 +129,21 @@ async fn main() -> Result<()> {
     let bob = Wallet::new(
         "bob",
         &[
-            json!({"type": "DIDCommMessaging", "serviceEndpoint": {"uri": node.doc.id, "accept": ["didcomm/v2"]}}),
+            json!({"type": "DIDCommMessaging", "serviceEndpoint": {"uri": mediator.doc.id, "accept": ["didcomm/v2"]}}),
         ],
     )?;
     let alice = Wallet::new("alice", &[])?;
 
-    let invitation: Value = node
+    let invitation: Value = mediator
         .http
-        .get(format!("{}/oob/invitation", node.base))
+        .get(format!("{}/oob/invitation", mediator.base))
         .send()
         .await?
         .error_for_status()?
         .json()
         .await?;
     ensure!(
-        invitation["invitation"]["from"] == node.doc.id,
+        invitation["invitation"]["from"] == mediator.doc.id,
         "invitation from another DID"
     );
     println!(
@@ -152,17 +152,19 @@ async fn main() -> Result<()> {
     );
 
     println!("2. Trust Ping");
-    node.request(&alice, "https://didcomm.org/trust-ping/2.0/ping", json!({}))
+    mediator
+        .request(&alice, "https://didcomm.org/trust-ping/2.0/ping", json!({}))
         .await?;
 
     println!("3. Bob requests mediation and registers his DID");
-    node.request(
-        &bob,
-        "https://didcomm.org/coordinate-mediation/3.0/mediate-request",
-        json!({}),
-    )
-    .await?;
-    let update = node
+    mediator
+        .request(
+            &bob,
+            "https://didcomm.org/coordinate-mediation/3.0/mediate-request",
+            json!({}),
+        )
+        .await?;
+    let update = mediator
         .request(
             &bob,
             "https://didcomm.org/coordinate-mediation/3.0/recipient-update",
@@ -175,7 +177,7 @@ async fn main() -> Result<()> {
         update.body
     );
 
-    println!("4. Alice sends Bob a message (wrapped in a forward to the node)");
+    println!("4. Alice sends Bob a message (wrapped in a forward to the mediator)");
     let packed = Message::new(
         "https://example.com/chat/1.0/message",
         json!({"text": "hello Bob"}),
@@ -186,7 +188,7 @@ async fn main() -> Result<()> {
         &bob.did,
         Some(&alice.did),
         None,
-        &node.resolver,
+        &mediator.resolver,
         &alice.secrets,
         PackOptions::default(),
     )
@@ -196,16 +198,16 @@ async fn main() -> Result<()> {
         .context("Bob's DID has no DIDComm service")?;
     // The document advertises the public URL; talk to the one we were given.
     let uri = uri.replacen(
-        &node.doc.service[0].didcomm_endpoints()?[0].uri,
-        &format!("{}/didcomm", node.base),
+        &mediator.doc.service[0].didcomm_endpoints()?[0].uri,
+        &format!("{}/didcomm", mediator.base),
         1,
     );
-    let (status, body) = node.post(&uri, packed.message).await?;
+    let (status, body) = mediator.post(&uri, packed.message).await?;
     ensure!(status == 202, "forward: HTTP {status}: {body}");
-    println!("  node accepted the forward (202)");
+    println!("  mediator accepted the forward (202)");
 
     println!("5. Bob picks it up");
-    let status = node
+    let status = mediator
         .request(
             &bob,
             "https://didcomm.org/messagepickup/3.0/status-request",
@@ -213,7 +215,7 @@ async fn main() -> Result<()> {
         )
         .await?;
     ensure!(status.body["message_count"] == 1, "status: {}", status.body);
-    let delivery = node
+    let delivery = mediator
         .request(
             &bob,
             "https://didcomm.org/messagepickup/3.0/delivery-request",
@@ -228,7 +230,7 @@ async fn main() -> Result<()> {
     let inner = String::from_utf8(b64::decode(
         attachment.data.base64.as_deref().context("no base64")?,
     )?)?;
-    let (message, meta) = unpack(&inner, &node.resolver, &bob.secrets).await?;
+    let (message, meta) = unpack(&inner, &mediator.resolver, &bob.secrets).await?;
     ensure!(
         meta.authenticated && message.from.as_deref() == Some(alice.did.as_str()),
         "not from Alice"
@@ -239,7 +241,7 @@ async fn main() -> Result<()> {
     );
 
     println!("6. Bob acknowledges");
-    let after = node
+    let after = mediator
         .request(
             &bob,
             "https://didcomm.org/messagepickup/3.0/messages-received",
@@ -253,25 +255,25 @@ async fn main() -> Result<()> {
     );
 
     println!("7. Bob goes live over a WebSocket");
-    let ws_url = format!("ws{}/ws", node.base.trim_start_matches("http"));
+    let ws_url = format!("ws{}/ws", mediator.base.trim_start_matches("http"));
     let (mut ws, _) = tokio_tungstenite::connect_async(&ws_url).await?;
     let live_on = Message::new(
         "https://didcomm.org/messagepickup/3.0/live-delivery-change",
         json!({"live_delivery": true}),
     )
     .from(&bob.did)
-    .to([node.doc.id.as_str()])
+    .to([mediator.doc.id.as_str()])
     .pack_encrypted(
-        &node.doc.id,
+        &mediator.doc.id,
         Some(&bob.did),
         None,
-        &node.resolver,
+        &mediator.resolver,
         &bob.secrets,
         PackOptions::default(),
     )
     .await?;
     ws.send(Frame::Text(live_on.message.into())).await?;
-    let (status, _) = unpack(&next_text(&mut ws).await?, &node.resolver, &bob.secrets).await?;
+    let (status, _) = unpack(&next_text(&mut ws).await?, &mediator.resolver, &bob.secrets).await?;
     ensure!(
         status.body["live_delivery"] == true,
         "live mode refused: {}",
@@ -289,14 +291,15 @@ async fn main() -> Result<()> {
         &bob.did,
         Some(&alice.did),
         None,
-        &node.resolver,
+        &mediator.resolver,
         &alice.secrets,
         PackOptions::default(),
     )
     .await?;
-    let (status, body) = node.post(&uri, packed.message).await?;
+    let (status, body) = mediator.post(&uri, packed.message).await?;
     ensure!(status == 202, "forward: HTTP {status}: {body}");
-    let (delivery, _) = unpack(&next_text(&mut ws).await?, &node.resolver, &bob.secrets).await?;
+    let (delivery, _) =
+        unpack(&next_text(&mut ws).await?, &mediator.resolver, &bob.secrets).await?;
     let attachment = delivery
         .attachments
         .as_deref()
@@ -305,25 +308,25 @@ async fn main() -> Result<()> {
     let inner = String::from_utf8(b64::decode(
         attachment.data.base64.as_deref().context("no base64")?,
     )?)?;
-    let (message, _) = unpack(&inner, &node.resolver, &bob.secrets).await?;
+    let (message, _) = unpack(&inner, &mediator.resolver, &bob.secrets).await?;
     println!("  Bob got it live: {:?}", message.body["text"]);
     let ack = Message::new(
         "https://didcomm.org/messagepickup/3.0/messages-received",
         json!({"message_id_list": [attachment.id]}),
     )
     .from(&bob.did)
-    .to([node.doc.id.as_str()])
+    .to([mediator.doc.id.as_str()])
     .pack_encrypted(
-        &node.doc.id,
+        &mediator.doc.id,
         Some(&bob.did),
         None,
-        &node.resolver,
+        &mediator.resolver,
         &bob.secrets,
         PackOptions::default(),
     )
     .await?;
     ws.send(Frame::Text(ack.message.into())).await?;
-    let (status, _) = unpack(&next_text(&mut ws).await?, &node.resolver, &bob.secrets).await?;
+    let (status, _) = unpack(&next_text(&mut ws).await?, &mediator.resolver, &bob.secrets).await?;
     ensure!(
         status.body["message_count"] == 0,
         "queue not empty: {}",
@@ -331,7 +334,7 @@ async fn main() -> Result<()> {
     );
     ws.close(None).await?;
 
-    println!("OK — the node works end to end.");
+    println!("OK — the mediator works end to end.");
     Ok(())
 }
 

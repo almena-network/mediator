@@ -11,11 +11,11 @@ pub struct Config {
     pub bind: SocketAddr,
     /// Log output format (`ALMENA_LOG_FORMAT`: `pretty` or `json`).
     pub log_format: LogFormat,
-    /// Public origin of the node, `scheme://host[:port]` without path
-    /// (`ALMENA_PUBLIC_URL`). The node's DID is the `did:web` of this origin
+    /// Public origin of the mediator, `scheme://host[:port]` without path
+    /// (`ALMENA_PUBLIC_URL`). The mediator's DID is the `did:web` of this origin
     /// and its DIDComm endpoint is `<origin>/didcomm`.
     pub public_url: String,
-    /// JSON file holding the node's private keys (`ALMENA_KEYS_PATH`);
+    /// JSON file holding the mediator's private keys (`ALMENA_KEYS_PATH`);
     /// created with fresh keys on first start.
     pub keys_path: PathBuf,
     /// Redis connection URL (`ALMENA_REDIS_URL`). `memory://` keeps
@@ -32,15 +32,15 @@ pub struct Config {
     /// `POST /didcomm` requests per minute per client IP; 0 turns the limit
     /// off (`ALMENA_RATE_LIMIT`).
     pub rate_limit: u64,
-    /// Header holding the client IP when the node runs behind a reverse
+    /// Header holding the client IP when the mediator runs behind a reverse
     /// proxy, e.g. `x-forwarded-for` (`ALMENA_CLIENT_IP_HEADER`). Its last
     /// value is used: the one the proxy added. Unset: the peer address.
     pub client_ip_header: Option<String>,
-    /// Relay `forward`s for recipients mediated elsewhere to their node, and
-    /// resolve other nodes' `did:web` over HTTPS (`ALMENA_FEDERATION`).
+    /// Relay `forward`s for recipients mediated elsewhere to their mediator, and
+    /// resolve other mediators' `did:web` over HTTPS (`ALMENA_FEDERATION`).
     pub federation: bool,
     /// Let outbound requests use plain HTTP and private addresses — local
-    /// multi-node testing only (`ALMENA_OUTBOUND_ALLOW_INSECURE`).
+    /// multi-mediator testing only (`ALMENA_OUTBOUND_ALLOW_INSECURE`).
     pub outbound_allow_insecure: bool,
 }
 
@@ -204,7 +204,7 @@ mod tests {
             ("ALMENA_HOST", "127.0.0.1"),
             ("ALMENA_PORT", "9000"),
             ("ALMENA_LOG_FORMAT", "json"),
-            ("ALMENA_PUBLIC_URL", "https://node.example.com/"),
+            ("ALMENA_PUBLIC_URL", "https://mediator.example.com/"),
             ("ALMENA_KEYS_PATH", "/data/keys.json"),
             ("ALMENA_REDIS_URL", "redis://redis:6379"),
             ("ALMENA_MAX_MESSAGE_BYTES", "2048"),
@@ -219,7 +219,7 @@ mod tests {
         .unwrap();
         assert_eq!(config.bind, "127.0.0.1:9000".parse().unwrap());
         assert_eq!(config.log_format, LogFormat::Json);
-        assert_eq!(config.public_url, "https://node.example.com");
+        assert_eq!(config.public_url, "https://mediator.example.com");
         assert_eq!(config.keys_path, PathBuf::from("/data/keys.json"));
         assert_eq!(config.redis_url, "redis://redis:6379");
         assert_eq!(config.max_message_bytes, 2048);
@@ -237,7 +237,8 @@ mod tests {
         assert!(Config::from_lookup(lookup(&[("ALMENA_PORT", "nope")])).is_err());
         assert!(Config::from_lookup(lookup(&[("ALMENA_LOG_FORMAT", "xml")])).is_err());
         assert!(
-            Config::from_lookup(lookup(&[("ALMENA_PUBLIC_URL", "https://x.org/node")])).is_err()
+            Config::from_lookup(lookup(&[("ALMENA_PUBLIC_URL", "https://x.org/mediator")]))
+                .is_err()
         );
         assert!(Config::from_lookup(lookup(&[("ALMENA_MAX_MESSAGE_BYTES", "0")])).is_err());
         assert!(Config::from_lookup(lookup(&[("ALMENA_QUEUE_TTL", "-1")])).is_err());

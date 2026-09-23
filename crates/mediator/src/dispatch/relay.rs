@@ -1,4 +1,4 @@
-//! Federation: passing a `forward` payload on to the node that mediates its
+//! Federation: passing a `forward` payload on to the mediator that mediates its
 //! `next` recipient (docs/didcomm.md §7).
 //!
 //! The payload is routed as a sender would route it: resolve `next`, wrap it
@@ -50,7 +50,7 @@ pub async fn relay(
             tracing::debug!(%next, "next has no DIDComm service");
             return Err(ReceiveError::UnknownRecipient);
         };
-        // A route that comes back to this node means `next` names us as its
+        // A route that comes back to this mediator means `next` names us as its
         // mediator without having registered: nowhere to deliver.
         let own_endpoint = own_endpoints(mediator);
         if routed.first_hop.as_deref().map(did_of) == Some(own.as_str())

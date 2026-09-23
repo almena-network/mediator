@@ -4,8 +4,8 @@
 
 use crate::{Error, Result};
 
-/// The `did:web` DID of a site root, e.g. `https://node.example.com` →
-/// `did:web:node.example.com`, `http://localhost:8080` →
+/// The `did:web` DID of a site root, e.g. `https://mediator.example.com` →
+/// `did:web:mediator.example.com`, `http://localhost:8080` →
 /// `did:web:localhost%3A8080`. The URL must have no path, query or fragment,
 /// because the document is then served at `/.well-known/did.json`.
 pub fn did_from_origin(origin: &str) -> Result<String> {
@@ -55,12 +55,12 @@ mod tests {
     #[test]
     fn origins_become_dids() {
         assert_eq!(
-            did_from_origin("https://node.example.com").unwrap(),
-            "did:web:node.example.com"
+            did_from_origin("https://mediator.example.com").unwrap(),
+            "did:web:mediator.example.com"
         );
         assert_eq!(
-            did_from_origin("https://Node.Example.com/").unwrap(),
-            "did:web:node.example.com"
+            did_from_origin("https://Mediator.Example.com/").unwrap(),
+            "did:web:mediator.example.com"
         );
         assert_eq!(
             did_from_origin("http://localhost:8080").unwrap(),
@@ -70,7 +70,7 @@ mod tests {
 
     #[test]
     fn origins_with_paths_are_rejected() {
-        assert!(did_from_origin("https://example.com/node").is_err());
+        assert!(did_from_origin("https://example.com/mediator").is_err());
         assert!(did_from_origin("ftp://example.com").is_err());
         assert!(did_from_origin("https://").is_err());
     }

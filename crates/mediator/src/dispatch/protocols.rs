@@ -1,4 +1,4 @@
-//! The DIDComm protocols the node answers: Trust Ping 2.0, Discover Features
+//! The DIDComm protocols the mediator answers: Trust Ping 2.0, Discover Features
 //! 2.0 and Report Problem 2.0.
 
 use almena_didcomm::Message;
@@ -27,7 +27,7 @@ pub const DELIVERY: &str = "https://didcomm.org/messagepickup/3.0/delivery";
 pub const MESSAGES_RECEIVED: &str = "https://didcomm.org/messagepickup/3.0/messages-received";
 pub const LIVE_DELIVERY_CHANGE: &str = "https://didcomm.org/messagepickup/3.0/live-delivery-change";
 
-/// Feature of the node, as disclosed by Discover Features.
+/// Feature of the mediator, as disclosed by Discover Features.
 struct Feature {
     feature_type: &'static str,
     id: &'static str,
@@ -135,10 +135,10 @@ fn matches(pattern: &str, value: &str) -> bool {
     }
 }
 
-/// Problems the node reports back to the sender.
+/// Problems the mediator reports back to the sender.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Problem {
-    /// The message type is not one the node handles.
+    /// The message type is not one the mediator handles.
     UnsupportedType,
     /// The body does not have the shape the message type requires.
     InvalidBody,
@@ -146,7 +146,7 @@ pub enum Problem {
     Expired,
     /// Mediation and pickup need an authcrypted sender.
     Unauthenticated,
-    /// The sender has no mediation with this node.
+    /// The sender has no mediation with this mediator.
     NoMediation,
     /// A `recipient_did` that the sender's mediation has not registered.
     UnknownRecipient(String),

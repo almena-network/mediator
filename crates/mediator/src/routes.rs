@@ -15,7 +15,7 @@ use utoipa::{OpenApi, ToSchema};
 use utoipa_axum::{router::OpenApiRouter, routes};
 use utoipa_scalar::{Scalar, Servable};
 
-use crate::mediator::{Mediator, Outcome, ReceiveError};
+use crate::dispatch::{Mediator, Outcome, ReceiveError};
 use crate::oob;
 use crate::store::Store;
 
@@ -29,11 +29,11 @@ const ENCRYPTED: &str = "application/didcomm-encrypted+json";
 #[derive(OpenApi)]
 #[openapi(
     info(
-        title = "Almena node",
-        description = "HTTP endpoints published by an Almena Network node (DIDComm Messaging v2.0 mediator)."
+        title = "Almena mediator",
+        description = "HTTP endpoints published by an Almena Network mediator (DIDComm Messaging v2.0)."
     ),
     tags(
-        (name = "didcomm", description = "DIDComm Messaging transport and the node's DID"),
+        (name = "didcomm", description = "DIDComm Messaging transport and the mediator's DID"),
         (name = "operations", description = "Service health and metadata")
     )
 )]
@@ -48,11 +48,11 @@ pub struct AppState {
     pub rate_limit: u64,
     /// Header with the client IP set by a reverse proxy (see `Config`).
     pub client_ip_header: Option<HeaderName>,
-    /// The node's public origin (`ALMENA_PUBLIC_URL`).
+    /// The mediator's public origin (`ALMENA_PUBLIC_URL`).
     pub public_url: String,
 }
 
-/// The node's HTTP router. Every endpoint is registered through
+/// The mediator's HTTP router. Every endpoint is registered through
 /// [`OpenApiRouter`], so it shows up in the OpenAPI document served at
 /// [`OPENAPI_PATH`] and in the reference page at [`DOCS_PATH`].
 pub fn router(state: AppState) -> Router {
@@ -76,7 +76,7 @@ fn docs(api: OpenApiDoc) -> Router {
     let json = Json(api.clone());
     Router::new()
         .route(OPENAPI_PATH, get(move || async move { json }))
-        .merge(Scalar::with_url(DOCS_PATH, api).title("Almena node API"))
+        .merge(Scalar::with_url(DOCS_PATH, api).title("Almena mediator API"))
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -97,8 +97,8 @@ fn error(status: StatusCode, message: impl Into<String>) -> Response {
 
 /// Receive a DIDComm message
 ///
-/// Takes one DIDComm encrypted message addressed to this node. Messages the
-/// node answers (Trust Ping, Discover Features, or a problem report) are
+/// Takes one DIDComm encrypted message addressed to this mediator. Messages the
+/// mediator answers (Trust Ping, Discover Features, or a problem report) are
 /// answered in the response body only if the message carries the
 /// `return_route: "all"` header; otherwise the response is `202` with no body.
 #[utoipa::path(
@@ -114,9 +114,9 @@ fn error(status: StatusCode, message: impl Into<String>) -> Response {
         (status = 200, description = "Accepted; the reply travels back in the body",
             content_type = "application/didcomm-encrypted+json", body = Object),
         (status = 202, description = "Accepted; no reply on this connection"),
-        (status = 400, description = "Not a DIDComm message this node can open", body = ErrorBody),
-        (status = 404, description = "A `forward` for a recipient DID this node does not mediate", body = ErrorBody),
-        (status = 413, description = "Larger than the node accepts (see `max_receive_bytes` in Discover Features)"),
+        (status = 400, description = "Not a DIDComm message this mediator can open", body = ErrorBody),
+        (status = 404, description = "A `forward` for a recipient DID this mediator does not mediate", body = ErrorBody),
+        (status = 413, description = "Larger than the mediator accepts (see `max_receive_bytes` in Discover Features)"),
         (status = 415, description = "Content-Type is not `application/didcomm-encrypted+json`", body = ErrorBody),
         (status = 429, description = "Too many requests from this client IP; retry after the `Retry-After` seconds"),
         (status = 503, description = "Storage unavailable; retry later", body = ErrorBody),
@@ -302,15 +302,15 @@ pub struct InvitationBody {
     #[schema(value_type = Object)]
     pub invitation: serde_json::Value,
     /// The invitation as a URL (`<origin>/oob?_oob=…`), for links and QR codes.
-    #[schema(example = "https://node.example.com/oob?_oob=eyJ0eXBlIjoi…")]
+    #[schema(example = "https://mediator.example.com/oob?_oob=eyJ0eXBlIjoi…")]
     pub url: String,
 }
 
 /// Mediation invitation
 ///
-/// The node's Out-of-Band 2.0 invitation (`goal_code: request-mediate`),
+/// The mediator's Out-of-Band 2.0 invitation (`goal_code: request-mediate`),
 /// and the same invitation as a URL for a link or QR code. A wallet resolves
-/// the node's DID from it and sends `mediate-request`. The invitation does
+/// the mediator's DID from it and sends `mediate-request`. The invitation does
 /// not change between requests or restarts.
 #[utoipa::path(
     get,
@@ -363,11 +363,11 @@ fn client_ip(
 }
 
 /// What a sender learns about a rejected envelope: enough to fix its own
-/// mistakes, nothing about the node's keys or internals.
+/// mistakes, nothing about the mediator's keys or internals.
 fn client_message(err: &almena_didcomm::Error) -> &'static str {
     use almena_didcomm::Error;
     match err {
-        Error::SecretNotFound(_) => "the message is not encrypted for this node",
+        Error::SecretNotFound(_) => "the message is not encrypted for this mediator",
         Error::DidNotFound(_) | Error::DidUrlNotFound(_) => {
             "the sender's DID or key could not be resolved"
         }
@@ -387,9 +387,9 @@ fn is_media_type(headers: &HeaderMap, expected: &str) -> bool {
         .is_some_and(|v| v.trim().eq_ignore_ascii_case(expected))
 }
 
-/// The node's DID document
+/// The mediator's DID document
 ///
-/// The `did:web` document of this node: its keys and its DIDComm endpoint.
+/// The `did:web` document of this mediator: its keys and its DIDComm endpoint.
 #[utoipa::path(
     get,
     path = "/.well-known/did.json",
@@ -405,12 +405,12 @@ pub struct Health {
     /// `ok`, or `degraded` when a dependency is down.
     #[schema(example = "ok")]
     pub status: &'static str,
-    #[schema(example = "almena-node")]
+    #[schema(example = "almena-mediator")]
     pub service: &'static str,
     #[schema(example = "0.1.0")]
     pub version: &'static str,
-    /// The node's DID.
-    #[schema(example = "did:web:node.example.com")]
+    /// The mediator's DID.
+    #[schema(example = "did:web:mediator.example.com")]
     pub did: String,
     /// `ok` or `unavailable`.
     #[schema(example = "ok")]
@@ -429,7 +429,7 @@ pub struct Health {
     path = "/health",
     tag = "operations",
     responses(
-        (status = 200, description = "The node is up", body = Health),
+        (status = 200, description = "The mediator is up", body = Health),
         (status = 503, description = "Storage is unreachable", body = Health)
     )
 )]
@@ -475,7 +475,7 @@ mod tests {
             store,
             rate_limit: 0,
             client_ip_header: None,
-            public_url: "https://node.example.com".into(),
+            public_url: "https://mediator.example.com".into(),
         }
     }
 
@@ -515,8 +515,8 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["status"], "ok");
-        assert_eq!(json["service"], "almena-node");
-        assert_eq!(json["did"], "did:web:node.example.com");
+        assert_eq!(json["service"], "almena-mediator");
+        assert_eq!(json["did"], "did:web:mediator.example.com");
         assert_eq!(json["storage"], "ok");
     }
 
@@ -530,10 +530,10 @@ mod tests {
         let (status, body) = get(state(), "/.well-known/did.json").await;
         assert_eq!(status, StatusCode::OK);
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(json["id"], "did:web:node.example.com");
+        assert_eq!(json["id"], "did:web:mediator.example.com");
         assert_eq!(
             json["service"][0]["serviceEndpoint"][0]["uri"],
-            "https://node.example.com/didcomm"
+            "https://mediator.example.com/didcomm"
         );
     }
 
@@ -607,7 +607,7 @@ mod tests {
         let (status, body) = get(state(), OPENAPI_PATH).await;
         assert_eq!(status, StatusCode::OK);
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(json["info"]["title"], "Almena node");
+        assert_eq!(json["info"]["title"], "Almena mediator");
         for path in ["/health", "/didcomm", "/.well-known/did.json"] {
             assert!(json["paths"][path].is_object(), "{path} missing");
         }
@@ -702,7 +702,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn invitation_names_the_node_and_encodes_itself_in_the_url() {
+    async fn invitation_names_the_mediator_and_encodes_itself_in_the_url() {
         let (status, body) = get(state(), "/oob/invitation").await;
         assert_eq!(status, StatusCode::OK);
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
@@ -710,13 +710,13 @@ mod tests {
             json["invitation"]["type"],
             "https://didcomm.org/out-of-band/2.0/invitation"
         );
-        assert_eq!(json["invitation"]["from"], "did:web:node.example.com");
+        assert_eq!(json["invitation"]["from"], "did:web:mediator.example.com");
         assert_eq!(json["invitation"]["body"]["goal_code"], "request-mediate");
         assert!(
             json["url"]
                 .as_str()
                 .unwrap()
-                .starts_with("https://node.example.com/oob?_oob=")
+                .starts_with("https://mediator.example.com/oob?_oob=")
         );
     }
 
@@ -727,7 +727,7 @@ mod tests {
         assert!(
             String::from_utf8(body)
                 .unwrap()
-                .contains("did:web:node.example.com")
+                .contains("did:web:mediator.example.com")
         );
     }
 
@@ -793,7 +793,7 @@ mod tests {
         let status = bob.open(identity, &next_text(&mut ws).await).await;
         assert_eq!(status.body["live_delivery"], true);
 
-        // Alice's message reaches the node (over HTTP here) and is pushed at once.
+        // Alice's message reaches the mediator (over HTTP here) and is pushed at once.
         let packed = Message::new(
             "https://example.com/chat/1.0/message",
             json!({"text": "live!"}),

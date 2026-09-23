@@ -40,7 +40,7 @@ impl Session {
 type Subscribers = Vec<(u64, mpsc::Sender<Queued>)>;
 
 /// In-process registry of live sessions per mediation. A deployment with
-/// several node instances would need to fan out through Redis pub/sub.
+/// several mediator instances would need to fan out through Redis pub/sub.
 #[derive(Default)]
 pub struct LiveHub {
     next_id: AtomicU64,

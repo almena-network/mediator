@@ -122,8 +122,8 @@ fn is_did(value: &str) -> bool {
 }
 
 /// Routing 2.0: queues each attached message for `next` when it is a
-/// recipient DID (or one of its key ids) registered with this node, and
-/// relays it to `next`'s own node otherwise (see `relay`). Forward
+/// recipient DID (or one of its key ids) registered with this mediator, and
+/// relays it to `next`'s own mediator otherwise (see `relay`). Forward
 /// senders are anonymous by design, so failures are reported at the HTTP
 /// level (see `ReceiveError`), never as DIDComm problem reports.
 pub async fn forward(mediator: &Mediator, message: &Message) -> Result<(), ReceiveError> {
@@ -163,7 +163,7 @@ pub async fn forward(mediator: &Mediator, message: &Message) -> Result<(), Recei
 
     let recipient = did_of(next);
     let Some(mediation) = mediator.store().mediation_of(recipient).await? else {
-        // Not ours: pass it on to the node that mediates `next`, if allowed.
+        // Not ours: pass it on to the mediator that mediates `next`, if allowed.
         return super::relay::relay(mediator, next, payloads).await;
     };
     for payload in payloads {
