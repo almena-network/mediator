@@ -16,8 +16,12 @@ pub const LIMITS: Limits = Limits {
     queue: QueueLimits {
         ttl_secs: 3600,
         max_messages: 5,
+        max_bytes: 1024 * 1024,
     },
     max_recipient_dids: 3,
+    push_min_interval_secs: 0,
+    // Off so tests can register any DID; the proof has tests of its own.
+    recipient_proof: false,
 };
 
 /// A mediator at `https://mediator.example.com` with an empty in-memory store.
@@ -81,6 +85,17 @@ impl Wallet {
         ])
     }
 
+    /// A possession proof of this wallet's DID for `mediation` at `mediator`,
+    /// issued at `iat`.
+    pub async fn proof(&self, mediator: &Identity, mediation: &str, iat: u64) -> String {
+        let mut proof = almena_didcomm::PossessionProof::new(&self.did, &mediator.did, mediation);
+        proof.iat = iat;
+        proof
+            .pack(None, &LocalResolver::new(), &self.secrets)
+            .await
+            .unwrap()
+    }
+
     /// Encrypts `message` to the mediator, authcrypt unless `anonymous`.
     pub async fn send(&self, mediator: &Identity, message: Message, anonymous: bool) -> String {
         let from = (!anonymous).then_some(self.did.as_str());
@@ -127,6 +142,51 @@ impl Wallet {
             Outcome::Reply(reply) => self.open(mediator.identity(), &reply).await,
             Outcome::Accepted => panic!("{type_}: expected a reply"),
         }
+    }
+}
+
+/// A [`Pusher`](crate::push::Pusher) that records the wake-ups it is asked
+/// for. Tokens starting with `dead` are reported invalid.
+pub struct RecordingPusher {
+    services: Vec<crate::push::Service>,
+    sent: tokio::sync::mpsc::UnboundedSender<(crate::push::Service, String)>,
+}
+
+impl RecordingPusher {
+    pub fn new(
+        services: &[crate::push::Service],
+    ) -> (
+        Arc<Self>,
+        tokio::sync::mpsc::UnboundedReceiver<(crate::push::Service, String)>,
+    ) {
+        let (sent, received) = tokio::sync::mpsc::unbounded_channel();
+        (
+            Arc::new(Self {
+                services: services.to_vec(),
+                sent,
+            }),
+            received,
+        )
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::push::Pusher for RecordingPusher {
+    fn services(&self) -> &[crate::push::Service] {
+        &self.services
+    }
+
+    async fn wake(
+        &self,
+        service: crate::push::Service,
+        token: &str,
+    ) -> anyhow::Result<crate::push::Sent> {
+        let _ = self.sent.send((service, token.to_owned()));
+        Ok(if token.starts_with("dead") {
+            crate::push::Sent::InvalidToken
+        } else {
+            crate::push::Sent::Delivered
+        })
     }
 }
 

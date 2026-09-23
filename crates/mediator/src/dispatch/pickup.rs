@@ -24,6 +24,8 @@ pub async fn handle(
     if !store.has_mediation(requester).await? {
         return Ok(Handled::Problem(Problem::NoMediation));
     }
+    // Any pickup means the wallet is awake: pushes may resume.
+    mediator.picked_up(requester).await?;
     // `recipient_did`, when given, must be one of the requester's.
     let recipient = match message.body.get("recipient_did") {
         None | Some(Value::Null) => None,

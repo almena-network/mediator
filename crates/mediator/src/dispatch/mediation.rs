@@ -3,7 +3,7 @@
 use almena_didcomm::crypto::jwe::Jwe;
 use almena_didcomm::did::did_of;
 use almena_didcomm::message::now;
-use almena_didcomm::{Message, b64};
+use almena_didcomm::{Message, PossessionProof, b64};
 use serde_json::{Value, json};
 
 use super::protocols::{self, Problem};
@@ -46,6 +46,11 @@ pub async fn handle(
                     .and_then(Value::as_str)
                     .unwrap_or_default();
                 let result = if !is_did(did) {
+                    "client_error"
+                } else if action == "add"
+                    && let Err(reason) = check_proof(mediator, requester, did, update).await
+                {
+                    tracing::debug!(mediation = %requester, recipient = %did, reason, "recipient refused");
                     "client_error"
                 } else {
                     match action {
@@ -107,6 +112,44 @@ pub async fn handle(
             ))
         }
         _ => Ok(Handled::Problem(Problem::UnsupportedType)),
+    }
+}
+
+/// How old a possession proof may be, and how far ahead of our clock.
+const PROOF_MAX_AGE_SECS: u64 = 300;
+const PROOF_MAX_SKEW_SECS: u64 = 60;
+
+/// A recipient DID other than the mediation's own must come with a proof
+/// that the requester controls it: a [`PossessionProof`] (`update.proof`)
+/// issued by that DID, for this mediator, on behalf of this mediation, and
+/// recent. Without it anyone could claim someone else's DID first.
+async fn check_proof(
+    mediator: &Mediator,
+    requester: &str,
+    did: &str,
+    update: &Value,
+) -> Result<(), &'static str> {
+    if !mediator.limits().recipient_proof || did == requester {
+        return Ok(());
+    }
+    let token = update
+        .get("proof")
+        .and_then(Value::as_str)
+        .ok_or("no proof")?;
+    let proof = PossessionProof::unpack(token, mediator.resolver())
+        .await
+        .map_err(|_| "proof does not verify")?;
+    let now = now();
+    if proof.iss != did {
+        Err("proof is for another DID")
+    } else if proof.aud != mediator.identity().did {
+        Err("proof is for another mediator")
+    } else if proof.sub != requester {
+        Err("proof is for another mediation")
+    } else if proof.iat + PROOF_MAX_AGE_SECS < now || proof.iat > now + PROOF_MAX_SKEW_SECS {
+        Err("proof is not recent")
+    } else {
+        Ok(())
     }
 }
 
@@ -190,6 +233,7 @@ pub async fn forward(mediator: &Mediator, message: &Message) -> Result<(), Recei
         );
     }
     tracing::debug!(%recipient, count = attachments.len(), "forward queued");
+    mediator.wake(&mediation);
     Ok(())
 }
 

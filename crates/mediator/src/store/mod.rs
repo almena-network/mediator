@@ -20,6 +20,7 @@ use async_trait::async_trait;
 
 pub use self::memory::MemoryStore;
 pub use self::redis::RedisStore;
+use crate::push::{Device, Service};
 
 /// Result of registering a recipient DID.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,6 +63,17 @@ pub struct QueueSummary {
     pub total_bytes: u64,
 }
 
+/// A `forward` payload waiting to be relayed to another mediator again.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PendingRelay {
+    /// Stable for the same payload and destination.
+    pub id: String,
+    pub uri: String,
+    pub message: String,
+    /// Retries already made.
+    pub retries: u32,
+}
+
 /// Queue limits, from the configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct QueueLimits {
@@ -69,6 +81,8 @@ pub struct QueueLimits {
     pub ttl_secs: u64,
     /// Per mediation.
     pub max_messages: usize,
+    /// Bytes of queued messages per mediation.
+    pub max_bytes: u64,
 }
 
 #[async_trait]
@@ -96,7 +110,8 @@ pub trait Store: Send + Sync {
     /// The mediation that registered `recipient`, if any.
     async fn mediation_of(&self, recipient: &str) -> Result<Option<String>>;
 
-    /// Appends a message to the mediation's queue. `None` when the queue is full.
+    /// Appends a message to the mediation's queue. `None` when the queue is
+    /// full: as many messages or as many bytes as the limits allow.
     async fn enqueue(
         &self,
         mediation: &str,
@@ -128,15 +143,55 @@ pub trait Store: Send + Sync {
     /// Counts a hit on `key` in the current fixed window of `window_secs`
     /// and returns the hits in that window so far.
     async fn hit(&self, key: &str, window_secs: u64, now: u64) -> Result<u64>;
+
+    /// Stores `relay` to be tried again at `due` (epoch seconds), replacing
+    /// any entry with its id. `false` when `max_pending` relays already wait.
+    async fn schedule_relay(
+        &self,
+        relay: &PendingRelay,
+        due: u64,
+        max_pending: usize,
+    ) -> Result<bool>;
+    /// Up to `limit` relays due by `now`. They are leased for `lease_secs`:
+    /// until [`Store::schedule_relay`] or [`Store::finish_relay`] is called or
+    /// the lease runs out, nobody else gets them.
+    async fn due_relays(
+        &self,
+        now: u64,
+        lease_secs: u64,
+        limit: usize,
+    ) -> Result<Vec<PendingRelay>>;
+    /// Forgets a relay: delivered, or given up.
+    async fn finish_relay(&self, id: &str) -> Result<()>;
+
+    /// Registers the mediation's device for `service`, replacing the one it
+    /// had, or removes it (`None`).
+    async fn set_device(
+        &self,
+        mediation: &str,
+        service: Service,
+        device: Option<&Device>,
+    ) -> Result<()>;
+    /// The mediation's devices, one per service at most, sorted by service.
+    async fn devices(&self, mediation: &str) -> Result<Vec<(Service, Device)>>;
+    /// Removes the device for `service` if its token is still `token`.
+    async fn remove_device(&self, mediation: &str, service: Service, token: &str) -> Result<()>;
+    /// Takes the turn to push to the mediation: `false` if a push went out
+    /// and the wallet has not picked up since. The turn is held for at most
+    /// `hold_secs`.
+    async fn claim_push(&self, mediation: &str, now: u64, hold_secs: u64) -> Result<bool>;
+    /// The wallet picked up: the next push may go `min_interval_secs` after
+    /// the last one.
+    async fn release_push(&self, mediation: &str, now: u64, min_interval_secs: u64) -> Result<()>;
 }
 
 /// Opens the store named by `url`: `memory://` for the in-process store,
-/// anything else is a Redis URL.
-pub async fn open(url: &str) -> Result<Arc<dyn Store>> {
+/// anything else is a Redis URL, authenticated with `password` if given.
+pub async fn open(url: &str, password: Option<&str>) -> Result<Arc<dyn Store>> {
     if url == "memory://" {
         Ok(Arc::new(MemoryStore::new()))
     } else {
-        Ok(Arc::new(RedisStore::connect(url).await?))
+        Ok(Arc::new(RedisStore::connect(url, password).await?))
     }
 }
 
@@ -164,6 +219,7 @@ pub(crate) mod contract {
     const LIMITS: QueueLimits = QueueLimits {
         ttl_secs: 3600,
         max_messages: 3,
+        max_bytes: 1024,
     };
 
     pub async fn run(store: &dyn Store) {
@@ -308,10 +364,169 @@ pub(crate) mod contract {
             std::slice::from_ref(&r2)
         );
 
+        // The byte limit: full at 5 bytes, freed by pickup and by expiry.
+        let tight = QueueLimits {
+            ttl_secs: 3600,
+            max_messages: 100,
+            max_bytes: 5,
+        };
+        let m3 = format!("did:peer:m3-{tag}");
+        let abc = store
+            .enqueue(&m3, &r3, "abc", now, tight)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            store
+                .enqueue(&m3, &r3, "def", now, tight)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .enqueue(&m3, &r3, "de", now, tight)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        store.remove(&m3, std::slice::from_ref(&abc)).await.unwrap();
+        assert!(
+            store
+                .enqueue(&m3, &r3, "xyz", now, tight)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        // Two hours on, everything queued has expired and its bytes are free.
+        assert!(
+            store
+                .enqueue(&m3, &r3, "12345", now + 7200, tight)
+                .await
+                .unwrap()
+                .is_some()
+        );
+
+        // Relays: due in order, leased while being tried, capped.
+        let relay = |n: u32| PendingRelay {
+            id: format!("relay-{tag}-{n}"),
+            uri: "https://elsewhere.example/didcomm".into(),
+            message: format!("payload {n}"),
+            retries: n,
+        };
+        let far = now + 1_000_000;
+        assert!(
+            store
+                .schedule_relay(&relay(1), far + 5, 1000)
+                .await
+                .unwrap()
+        );
+        assert!(
+            store
+                .schedule_relay(&relay(2), far + 30, 1000)
+                .await
+                .unwrap()
+        );
+        assert!(store.due_relays(far, 60, 10).await.unwrap().is_empty());
+        let due = store.due_relays(far + 10, 60, 10).await.unwrap();
+        assert!(due.contains(&relay(1)) && !due.contains(&relay(2)));
+        // Leased: not handed out again until the lease runs out.
+        assert!(
+            !store
+                .due_relays(far + 20, 60, 10)
+                .await
+                .unwrap()
+                .contains(&relay(1))
+        );
+        assert!(
+            store
+                .due_relays(far + 71, 60, 10)
+                .await
+                .unwrap()
+                .contains(&relay(1))
+        );
+        // Rescheduled, and finished.
+        let mut again = relay(1);
+        again.retries = 2;
+        assert!(store.schedule_relay(&again, far + 200, 1000).await.unwrap());
+        let later = store.due_relays(far + 300, 60, 10).await.unwrap();
+        assert!(later.contains(&again) && later.contains(&relay(2)));
+        store.finish_relay(&again.id).await.unwrap();
+        store.finish_relay(&relay(2).id).await.unwrap();
+        assert!(
+            store
+                .due_relays(far + 10_000, 60, 10)
+                .await
+                .unwrap()
+                .iter()
+                .all(|r| !r.id.contains(&tag))
+        );
+        // Nothing more than `max_pending` waits.
+        assert!(
+            store
+                .schedule_relay(&relay(3), far + 5, 1000)
+                .await
+                .unwrap()
+        );
+        assert!(!store.schedule_relay(&relay(4), far + 5, 1).await.unwrap());
+        store.finish_relay(&relay(3).id).await.unwrap();
+
         let key = format!("rate-{tag}");
         assert_eq!(store.hit(&key, 60, now).await.unwrap(), 1);
         assert_eq!(store.hit(&key, 60, now).await.unwrap(), 2);
         assert_eq!(store.hit(&key, 60, now + 60).await.unwrap(), 1);
+
+        // Devices: one per service, replaced, removed only with the same token.
+        let phone = Device {
+            token: "t1".into(),
+            platform: Some("android".into()),
+        };
+        let newer = Device {
+            token: "t2".into(),
+            platform: Some("android".into()),
+        };
+        let iphone = Device {
+            token: "abcd".into(),
+            platform: None,
+        };
+        assert!(store.devices(&m1).await.unwrap().is_empty());
+        store
+            .set_device(&m1, Service::Apns, Some(&iphone))
+            .await
+            .unwrap();
+        store
+            .set_device(&m1, Service::Fcm, Some(&phone))
+            .await
+            .unwrap();
+        store
+            .set_device(&m1, Service::Fcm, Some(&newer))
+            .await
+            .unwrap();
+        assert_eq!(
+            store.devices(&m1).await.unwrap(),
+            [
+                (Service::Fcm, newer.clone()),
+                (Service::Apns, iphone.clone())
+            ]
+        );
+        store.remove_device(&m1, Service::Fcm, "t1").await.unwrap();
+        assert_eq!(store.devices(&m1).await.unwrap().len(), 2);
+        store.remove_device(&m1, Service::Fcm, "t2").await.unwrap();
+        store.set_device(&m1, Service::Apns, None).await.unwrap();
+        assert!(store.devices(&m1).await.unwrap().is_empty());
+        assert!(store.devices(&m2).await.unwrap().is_empty());
+
+        // One push until the wallet picks up, then not before the interval.
+        assert!(store.claim_push(&m1, now, 3600).await.unwrap());
+        assert!(!store.claim_push(&m1, now + 100, 3600).await.unwrap());
+        assert!(store.claim_push(&m2, now, 3600).await.unwrap());
+        store.release_push(&m1, now + 10, 60).await.unwrap();
+        assert!(!store.claim_push(&m1, now + 10, 3600).await.unwrap());
+        store.release_push(&m2, now + 60, 60).await.unwrap();
+        assert!(store.claim_push(&m2, now + 60, 3600).await.unwrap());
+        // Releasing with nothing claimed is harmless.
+        store.release_push(&r3, now, 60).await.unwrap();
+        assert!(store.claim_push(&r3, now, 3600).await.unwrap());
     }
 
     fn uuid() -> String {

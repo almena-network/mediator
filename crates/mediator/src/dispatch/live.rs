@@ -88,6 +88,13 @@ impl LiveHub {
         }
     }
 
+    /// Whether some session has live mode on for `mediation`.
+    pub fn is_live(&self, mediation: &str) -> bool {
+        self.sessions
+            .lock()
+            .is_ok_and(|sessions| sessions.get(mediation).is_some_and(|list| !list.is_empty()))
+    }
+
     /// Pushes a newly queued message to the mediation's live sessions.
     /// Never blocks: a session that is behind or gone just misses the push.
     pub fn notify(&self, mediation: &str, queued: &Queued) {

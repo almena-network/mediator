@@ -28,6 +28,7 @@ pub mod from_prior;
 pub mod jwk;
 pub mod message;
 mod pack;
+pub mod possession;
 pub mod secrets;
 mod unpack;
 
@@ -39,5 +40,6 @@ pub use from_prior::FromPrior;
 pub use jwk::Jwk;
 pub use message::{Attachment, Message};
 pub use pack::{FORWARD, PackOptions, PackedMessage, Routed, route};
+pub use possession::PossessionProof;
 pub use secrets::{InMemorySecrets, SecretsResolver};
 pub use unpack::{UnpackMetadata, unpack};

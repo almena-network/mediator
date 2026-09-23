@@ -4,6 +4,8 @@ use std::str::FromStr;
 
 use anyhow::{Context, Result};
 
+use crate::push::ApnsConfig;
+
 /// Runtime configuration, read from `ALMENA_*` environment variables.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
@@ -21,14 +23,21 @@ pub struct Config {
     /// Redis connection URL (`ALMENA_REDIS_URL`). `memory://` keeps
     /// everything in the process instead: development only.
     pub redis_url: String,
+    /// Redis password (`ALMENA_REDIS_PASSWORD`); unset or empty: none.
+    pub redis_password: Option<Secret>,
     /// Largest DIDComm envelope accepted, in bytes (`ALMENA_MAX_MESSAGE_BYTES`).
     pub max_message_bytes: usize,
     /// Undelivered messages are dropped after this many seconds (`ALMENA_QUEUE_TTL`).
     pub queue_ttl_secs: u64,
     /// Queued messages per mediation (`ALMENA_QUEUE_MAX_MESSAGES`).
     pub queue_max_messages: usize,
+    /// Bytes of queued messages per mediation (`ALMENA_QUEUE_MAX_BYTES`).
+    pub queue_max_bytes: u64,
     /// Recipient DIDs per mediation (`ALMENA_MAX_RECIPIENT_DIDS`).
     pub max_recipient_dids: usize,
+    /// Registering someone else's DID needs a possession proof
+    /// (`ALMENA_RECIPIENT_PROOF`: `required` or `off`).
+    pub recipient_proof: bool,
     /// `POST /didcomm` requests per minute per client IP; 0 turns the limit
     /// off (`ALMENA_RATE_LIMIT`).
     pub rate_limit: u64,
@@ -42,6 +51,51 @@ pub struct Config {
     /// Let outbound requests use plain HTTP and private addresses — local
     /// multi-mediator testing only (`ALMENA_OUTBOUND_ALLOW_INSECURE`).
     pub outbound_allow_insecure: bool,
+    /// Push wake-ups (`ALMENA_PUSH_*`, `ALMENA_FCM_*`, `ALMENA_APNS_*`).
+    pub push: PushConfig,
+}
+
+/// A value kept out of logs: `Debug` prints `<redacted>`.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Secret(pub String);
+
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("<redacted>")
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PushConfig {
+    /// `ALMENA_PUSH_MODE`: `off` or `direct` (the mediator calls FCM and
+    /// APNs with the wallet app's credentials).
+    pub mode: PushMode,
+    /// Least seconds between two pushes to one mediation
+    /// (`ALMENA_PUSH_MIN_INTERVAL`).
+    pub min_interval_secs: u64,
+    /// Google service account key file of the wallet app's Firebase project
+    /// (`ALMENA_FCM_SERVICE_ACCOUNT`).
+    pub fcm_service_account: Option<PathBuf>,
+    /// `ALMENA_APNS_KEY_PATH`, `ALMENA_APNS_KEY_ID`, `ALMENA_APNS_TEAM_ID`,
+    /// `ALMENA_APNS_TOPIC` and `ALMENA_APNS_SANDBOX`.
+    pub apns: Option<ApnsConfig>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PushMode {
+    Off,
+    Direct,
+}
+
+impl Default for PushConfig {
+    fn default() -> Self {
+        Self {
+            mode: PushMode::Off,
+            min_interval_secs: 60,
+            fcm_service_account: None,
+            apns: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,14 +112,18 @@ impl Default for Config {
             public_url: "http://localhost:8080".to_owned(),
             keys_path: PathBuf::from("data/keys.json"),
             redis_url: "redis://localhost:6379".to_owned(),
+            redis_password: None,
             max_message_bytes: 1024 * 1024,
             queue_ttl_secs: 30 * 24 * 3600,
             queue_max_messages: 10_000,
+            queue_max_bytes: 100 * 1024 * 1024,
             max_recipient_dids: 100,
+            recipient_proof: true,
             rate_limit: 60,
             client_ip_header: None,
             federation: true,
             outbound_allow_insecure: false,
+            push: PushConfig::default(),
         }
     }
 }
@@ -115,12 +173,15 @@ impl Config {
             None => None,
         };
 
-        Ok(Self {
+        let config = Self {
             bind: SocketAddr::new(host, port),
             log_format,
             public_url,
             keys_path: lookup("ALMENA_KEYS_PATH").map_or(default.keys_path, PathBuf::from),
             redis_url: lookup("ALMENA_REDIS_URL").unwrap_or(default.redis_url),
+            redis_password: lookup("ALMENA_REDIS_PASSWORD")
+                .filter(|p| !p.is_empty())
+                .map(Secret),
             max_message_bytes: positive(
                 &lookup,
                 "ALMENA_MAX_MESSAGE_BYTES",
@@ -132,11 +193,19 @@ impl Config {
                 "ALMENA_QUEUE_MAX_MESSAGES",
                 default.queue_max_messages,
             )?,
+            queue_max_bytes: positive(&lookup, "ALMENA_QUEUE_MAX_BYTES", default.queue_max_bytes)?,
             max_recipient_dids: positive(
                 &lookup,
                 "ALMENA_MAX_RECIPIENT_DIDS",
                 default.max_recipient_dids,
             )?,
+            recipient_proof: match lookup("ALMENA_RECIPIENT_PROOF").as_deref().map(str::trim) {
+                None | Some("required") => true,
+                Some("off") => false,
+                Some(other) => anyhow::bail!(
+                    "invalid ALMENA_RECIPIENT_PROOF: {other} (expected required or off)"
+                ),
+            },
             rate_limit: match lookup("ALMENA_RATE_LIMIT") {
                 Some(v) => v
                     .parse()
@@ -150,8 +219,59 @@ impl Config {
                 "ALMENA_OUTBOUND_ALLOW_INSECURE",
                 default.outbound_allow_insecure,
             )?,
-        })
+            push: push(&lookup, default.push)?,
+        };
+        anyhow::ensure!(
+            config.queue_max_bytes >= config.max_message_bytes as u64,
+            "ALMENA_QUEUE_MAX_BYTES ({}) is below ALMENA_MAX_MESSAGE_BYTES ({}): no message would fit",
+            config.queue_max_bytes,
+            config.max_message_bytes
+        );
+        Ok(config)
     }
+}
+
+fn push(lookup: &impl Fn(&str) -> Option<String>, default: PushConfig) -> Result<PushConfig> {
+    let mode = match lookup("ALMENA_PUSH_MODE").as_deref().map(str::trim) {
+        None | Some("off") => PushMode::Off,
+        Some("direct") => PushMode::Direct,
+        Some(other) => anyhow::bail!("invalid ALMENA_PUSH_MODE: {other} (expected off or direct)"),
+    };
+    let set = |key: &str| lookup(key).filter(|v| !v.trim().is_empty());
+    let apns_keys = [
+        "ALMENA_APNS_KEY_PATH",
+        "ALMENA_APNS_KEY_ID",
+        "ALMENA_APNS_TEAM_ID",
+        "ALMENA_APNS_TOPIC",
+    ];
+    let apns = match apns_keys.map(set) {
+        [Some(key_path), Some(key_id), Some(team_id), Some(topic)] => Some(ApnsConfig {
+            key_path: PathBuf::from(key_path),
+            key_id,
+            team_id,
+            topic,
+            sandbox: boolean(lookup, "ALMENA_APNS_SANDBOX", false)?,
+        }),
+        [None, None, None, None] => None,
+        _ => anyhow::bail!("APNs needs all of {}", apns_keys.join(", ")),
+    };
+    let push = PushConfig {
+        mode,
+        min_interval_secs: match lookup("ALMENA_PUSH_MIN_INTERVAL") {
+            Some(v) => v
+                .parse()
+                .with_context(|| format!("invalid ALMENA_PUSH_MIN_INTERVAL: {v}"))?,
+            None => default.min_interval_secs,
+        },
+        fcm_service_account: set("ALMENA_FCM_SERVICE_ACCOUNT").map(PathBuf::from),
+        apns,
+    };
+    if push.mode == PushMode::Direct && push.fcm_service_account.is_none() && push.apns.is_none() {
+        anyhow::bail!(
+            "ALMENA_PUSH_MODE=direct needs ALMENA_FCM_SERVICE_ACCOUNT or the ALMENA_APNS_* settings"
+        );
+    }
+    Ok(push)
 }
 
 /// `true`/`false` (also `1`/`0`), or `default` when unset.
@@ -207,10 +327,13 @@ mod tests {
             ("ALMENA_PUBLIC_URL", "https://mediator.example.com/"),
             ("ALMENA_KEYS_PATH", "/data/keys.json"),
             ("ALMENA_REDIS_URL", "redis://redis:6379"),
+            ("ALMENA_REDIS_PASSWORD", "s3cret"),
             ("ALMENA_MAX_MESSAGE_BYTES", "2048"),
             ("ALMENA_QUEUE_TTL", "60"),
             ("ALMENA_QUEUE_MAX_MESSAGES", "5"),
+            ("ALMENA_QUEUE_MAX_BYTES", "4096"),
             ("ALMENA_MAX_RECIPIENT_DIDS", "7"),
+            ("ALMENA_RECIPIENT_PROOF", "off"),
             ("ALMENA_RATE_LIMIT", "0"),
             ("ALMENA_CLIENT_IP_HEADER", "X-Forwarded-For"),
             ("ALMENA_FEDERATION", "false"),
@@ -222,10 +345,14 @@ mod tests {
         assert_eq!(config.public_url, "https://mediator.example.com");
         assert_eq!(config.keys_path, PathBuf::from("/data/keys.json"));
         assert_eq!(config.redis_url, "redis://redis:6379");
+        assert_eq!(config.redis_password, Some(Secret("s3cret".into())));
+        assert!(!format!("{config:?}").contains("s3cret"));
         assert_eq!(config.max_message_bytes, 2048);
         assert_eq!(config.queue_ttl_secs, 60);
         assert_eq!(config.queue_max_messages, 5);
+        assert_eq!(config.queue_max_bytes, 4096);
         assert_eq!(config.max_recipient_dids, 7);
+        assert!(!config.recipient_proof);
         assert_eq!(config.rate_limit, 0);
         assert_eq!(config.client_ip_header.as_deref(), Some("x-forwarded-for"));
         assert!(!config.federation);
@@ -242,6 +369,47 @@ mod tests {
         );
         assert!(Config::from_lookup(lookup(&[("ALMENA_MAX_MESSAGE_BYTES", "0")])).is_err());
         assert!(Config::from_lookup(lookup(&[("ALMENA_QUEUE_TTL", "-1")])).is_err());
+        // A queue smaller than one message.
+        assert!(Config::from_lookup(lookup(&[("ALMENA_QUEUE_MAX_BYTES", "1000")])).is_err());
         assert!(Config::from_lookup(lookup(&[("ALMENA_CLIENT_IP_HEADER", "bad header")])).is_err());
+    }
+
+    #[test]
+    fn reads_push_settings() {
+        let config = Config::from_lookup(lookup(&[
+            ("ALMENA_PUSH_MODE", "direct"),
+            ("ALMENA_PUSH_MIN_INTERVAL", "30"),
+            ("ALMENA_FCM_SERVICE_ACCOUNT", "/secrets/fcm.json"),
+            ("ALMENA_APNS_KEY_PATH", "/secrets/apns.p8"),
+            ("ALMENA_APNS_KEY_ID", "KEY1234567"),
+            ("ALMENA_APNS_TEAM_ID", "TEAM123456"),
+            ("ALMENA_APNS_TOPIC", "network.almena.wallet"),
+            ("ALMENA_APNS_SANDBOX", "true"),
+        ]))
+        .unwrap();
+        assert_eq!(config.push.mode, PushMode::Direct);
+        assert_eq!(config.push.min_interval_secs, 30);
+        assert_eq!(
+            config.push.fcm_service_account,
+            Some(PathBuf::from("/secrets/fcm.json"))
+        );
+        let apns = config.push.apns.unwrap();
+        assert_eq!(apns.topic, "network.almena.wallet");
+        assert!(apns.sandbox);
+    }
+
+    #[test]
+    fn rejects_incomplete_push_settings() {
+        assert!(Config::from_lookup(lookup(&[("ALMENA_PUSH_MODE", "gateway")])).is_err());
+        // Direct mode with no credentials at all.
+        assert!(Config::from_lookup(lookup(&[("ALMENA_PUSH_MODE", "direct")])).is_err());
+        // Half an APNs configuration.
+        assert!(
+            Config::from_lookup(lookup(&[
+                ("ALMENA_PUSH_MODE", "direct"),
+                ("ALMENA_APNS_KEY_PATH", "/secrets/apns.p8"),
+            ]))
+            .is_err()
+        );
     }
 }

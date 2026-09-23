@@ -3,3 +3,10 @@
 .DS_Store
 # Local mediator keys (task dev)
 /data
+
+# Push credentials mounted by compose.yml
+/secrets
+
+# Interop clients (interop/)
+node_modules/
+interop/veramo/caddy-root.crt

@@ -1,0 +1,6 @@
+# HTTPS in front of the mediator for development. `tls internal`: the
+# certificate comes from Caddy's local CA, not Let's Encrypt.
+mediator.dev.almena.network {
+	tls internal
+	reverse_proxy mediator:8080
+}

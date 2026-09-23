@@ -9,10 +9,19 @@
 //! | `recipient:{R}` | string | The mediation that registered `R` |
 //! | `mediation:{M}:queue` | stream | One entry per queued message: `r` recipient, `s` size in bytes |
 //! | `mediation:{M}:msg:{id}` | string | Body of queue entry `id`, expiring with the queue TTL |
+//! | `mediation:{M}:bytes` | string | Total size of the queued messages, for `max_bytes` |
 //! | `rate:{key}:{window}` | string | Hit counter of one rate-limit window |
+//! | `push:{M}` | hash | Push service (`fcm`, `apns`) → device, as JSON |
+//! | `push-sent:{M}` | string | Time of the last push, until the wallet picks up |
+//! | `relay:due` | sorted set | Relay ids by when they are next tried |
+//! | `relay:items` | hash | Relay id → the pending relay, as JSON |
 //!
 //! Bodies live outside the stream so that status queries read only the small
-//! entries. Multi-key updates run as Lua scripts, so they are atomic.
+//! entries. Multi-key updates run as Lua scripts, so they are atomic; every
+//! script that adds, expires or removes queue entries keeps the byte counter
+//! in step.
+
+use std::sync::LazyLock;
 
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
@@ -21,8 +30,10 @@ use redis::aio::ConnectionManager;
 use redis::streams::StreamRangeReply;
 
 use super::{
-    AddRecipient, QueueLimits, QueueSummary, Queued, RemoveRecipient, Store, id_millis, is_queue_id,
+    AddRecipient, PendingRelay, QueueLimits, QueueSummary, Queued, RemoveRecipient, Store,
+    id_millis, is_queue_id,
 };
+use crate::push::{Device, Service};
 
 const ADD_RECIPIENT: &str = r"
 local owner = redis.call('GET', KEYS[1])
@@ -43,14 +54,125 @@ redis.call('SREM', KEYS[2], ARGV[2])
 return 'removed'
 ";
 
-/// KEYS[1] queue; ARGV: min id, max messages, recipient, size, body, ttl, body key prefix.
-const ENQUEUE: &str = r"
-redis.call('XTRIM', KEYS[1], 'MINID', ARGV[1])
+/// Lua helpers shared by the queue scripts: the size of a stream entry, and
+/// trimming expired entries while taking their bytes off the counter.
+const QUEUE_LUA: &str = r"
+local function entry_size(entry)
+  local fields = entry[2]
+  for i = 1, #fields, 2 do
+    if fields[i] == 's' then return tonumber(fields[i + 1]) end
+  end
+  return 0
+end
+local function uncount(bytes, freed)
+  if freed > 0 and redis.call('DECRBY', bytes, freed) < 0 then
+    redis.call('SET', bytes, 0, 'KEEPTTL')
+  end
+end
+local function trim(queue, bytes, minid)
+  local freed = 0
+  for _, entry in ipairs(redis.call('XRANGE', queue, '-', '(' .. minid)) do
+    freed = freed + entry_size(entry)
+  end
+  redis.call('XTRIM', queue, 'MINID', minid)
+  uncount(bytes, freed)
+end
+";
+
+/// KEYS[1] queue, KEYS[2] byte counter; ARGV: min id, max messages, max
+/// bytes, recipient, size, body, ttl, body key prefix.
+static ENQUEUE: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        r"{QUEUE_LUA}
+trim(KEYS[1], KEYS[2], ARGV[1])
 if redis.call('XLEN', KEYS[1]) >= tonumber(ARGV[2]) then return false end
-local id = redis.call('XADD', KEYS[1], '*', 'r', ARGV[3], 's', ARGV[4])
-redis.call('SET', ARGV[7] .. id, ARGV[5], 'EX', ARGV[6])
-redis.call('EXPIRE', KEYS[1], ARGV[6])
+local used = tonumber(redis.call('GET', KEYS[2]) or '0')
+if used + tonumber(ARGV[5]) > tonumber(ARGV[3]) then return false end
+local id = redis.call('XADD', KEYS[1], '*', 'r', ARGV[4], 's', ARGV[5])
+redis.call('SET', ARGV[8] .. id, ARGV[6], 'EX', ARGV[7])
+redis.call('INCRBY', KEYS[2], ARGV[5])
+redis.call('EXPIRE', KEYS[1], ARGV[7])
+redis.call('EXPIRE', KEYS[2], ARGV[7])
 return id
+"
+    )
+});
+
+/// KEYS[1] queue, KEYS[2] byte counter; ARGV: min id.
+static TRIM: LazyLock<String> =
+    LazyLock::new(|| format!("{QUEUE_LUA}\ntrim(KEYS[1], KEYS[2], ARGV[1])\nreturn 0"));
+
+/// KEYS[1] queue, KEYS[2] byte counter; ARGV: body key prefix, then the ids.
+static REMOVE: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        r"{QUEUE_LUA}
+local removed, freed = 0, 0
+for i = 2, #ARGV do
+  local entry = redis.call('XRANGE', KEYS[1], ARGV[i], ARGV[i])[1]
+  if entry then
+    freed = freed + entry_size(entry)
+    removed = removed + redis.call('XDEL', KEYS[1], ARGV[i])
+  end
+  redis.call('DEL', ARGV[1] .. ARGV[i])
+end
+uncount(KEYS[2], freed)
+return removed
+"
+    )
+});
+
+/// KEYS[1] devices; ARGV: service, token.
+const REMOVE_DEVICE: &str = r"
+local device = redis.call('HGET', KEYS[1], ARGV[1])
+if device and cjson.decode(device).token == ARGV[2] then
+  redis.call('HDEL', KEYS[1], ARGV[1])
+end
+return 0
+";
+
+/// KEYS[1] push marker; ARGV: now, min interval.
+const RELEASE_PUSH: &str = r"
+local sent = redis.call('GET', KEYS[1])
+if not sent then return 0 end
+local left = tonumber(sent) + tonumber(ARGV[2]) - tonumber(ARGV[1])
+if left <= 0 then
+  redis.call('DEL', KEYS[1])
+else
+  local ttl = redis.call('TTL', KEYS[1])
+  if ttl < 0 or left < ttl then redis.call('EXPIRE', KEYS[1], left) end
+end
+return 0
+";
+
+const RELAY_DUE: &str = "relay:due";
+const RELAY_ITEMS: &str = "relay:items";
+
+/// KEYS[1] due set, KEYS[2] items; ARGV: id, due, relay JSON, max pending.
+const SCHEDULE_RELAY: &str = r"
+if redis.call('HEXISTS', KEYS[2], ARGV[1]) == 0
+   and redis.call('HLEN', KEYS[2]) >= tonumber(ARGV[4]) then
+  return 0
+end
+redis.call('HSET', KEYS[2], ARGV[1], ARGV[3])
+redis.call('ZADD', KEYS[1], ARGV[2], ARGV[1])
+return 1
+";
+
+/// KEYS[1] due set, KEYS[2] items; ARGV: now, lease end, limit. Leases the
+/// due relays by moving them to the lease end, and returns them.
+const DUE_RELAYS: &str = r"
+local ids = redis.call('ZRANGE', KEYS[1], '-inf', ARGV[1], 'BYSCORE', 'LIMIT', 0, ARGV[3])
+local relays = {}
+for _, id in ipairs(ids) do
+  local relay = redis.call('HGET', KEYS[2], id)
+  if relay then
+    redis.call('ZADD', KEYS[1], ARGV[2], id)
+    table.insert(relays, relay)
+  else
+    redis.call('ZREM', KEYS[1], id)
+  end
+end
+return relays
 ";
 
 pub struct RedisStore {
@@ -59,12 +181,27 @@ pub struct RedisStore {
 
 impl RedisStore {
     /// Connects to `url`. Fails if Redis cannot be reached at start-up.
-    pub async fn connect(url: &str) -> Result<Self> {
+    /// Connects to `url`, with `password` if given (it replaces any in the
+    /// URL). Fails if Redis cannot be reached at start-up. Errors show the URL
+    /// without its password.
+    pub async fn connect(url: &str, password: Option<&str>) -> Result<Self> {
+        let mut parsed = url::Url::parse(url).context("invalid Redis URL")?;
+        let _ = parsed.set_password(None);
+        let shown = parsed.to_string();
+        let url = match password {
+            Some(password) => {
+                parsed
+                    .set_password(Some(password))
+                    .map_err(|()| anyhow::anyhow!("Redis URL {shown} cannot carry a password"))?;
+                parsed.to_string()
+            }
+            None => url.to_owned(),
+        };
         let client =
-            redis::Client::open(url).with_context(|| format!("invalid Redis URL {url}"))?;
+            redis::Client::open(url).with_context(|| format!("invalid Redis URL {shown}"))?;
         let conn = ConnectionManager::new(client)
             .await
-            .with_context(|| format!("connecting to Redis at {url}"))?;
+            .with_context(|| format!("connecting to Redis at {shown}"))?;
         Ok(Self { conn })
     }
 
@@ -81,11 +218,11 @@ impl RedisStore {
     ) -> Result<Vec<(String, String, u64)>> {
         let key = queue_key(mediation);
         let mut conn = self.conn();
-        let _: () = redis::cmd("XTRIM")
-            .arg(&key)
-            .arg("MINID")
+        let _: i64 = redis::Script::new(&TRIM)
+            .key(&key)
+            .key(bytes_key(mediation))
             .arg(min_id(now, ttl_secs))
-            .query_async(&mut conn)
+            .invoke_async(&mut conn)
             .await?;
         let reply: StreamRangeReply = conn.xrange_all(&key).await?;
         Ok(reply
@@ -116,8 +253,20 @@ fn queue_key(mediation: &str) -> String {
     format!("mediation:{mediation}:queue")
 }
 
+fn bytes_key(mediation: &str) -> String {
+    format!("mediation:{mediation}:bytes")
+}
+
 fn body_prefix(mediation: &str) -> String {
     format!("mediation:{mediation}:msg:")
+}
+
+fn devices_key(mediation: &str) -> String {
+    format!("push:{mediation}")
+}
+
+fn push_sent_key(mediation: &str) -> String {
+    format!("push-sent:{mediation}")
 }
 
 /// Stream id below which entries are older than the TTL.
@@ -210,10 +359,12 @@ impl Store for RedisStore {
         now: u64,
         limits: QueueLimits,
     ) -> Result<Option<String>> {
-        Ok(redis::Script::new(ENQUEUE)
+        Ok(redis::Script::new(&ENQUEUE)
             .key(queue_key(mediation))
+            .key(bytes_key(mediation))
             .arg(min_id(now, limits.ttl_secs))
             .arg(limits.max_messages)
+            .arg(limits.max_bytes)
             .arg(recipient)
             .arg(message.len())
             .arg(message)
@@ -294,12 +445,13 @@ impl Store for RedisStore {
         if ids.is_empty() {
             return Ok(0);
         }
-        let prefix = body_prefix(mediation);
-        let mut conn = self.conn();
-        let removed: usize = conn.xdel(queue_key(mediation), &ids).await?;
-        let keys: Vec<String> = ids.iter().map(|id| format!("{prefix}{id}")).collect();
-        let _: usize = conn.del(&keys).await?;
-        Ok(removed)
+        Ok(redis::Script::new(&REMOVE)
+            .key(queue_key(mediation))
+            .key(bytes_key(mediation))
+            .arg(body_prefix(mediation))
+            .arg(ids)
+            .invoke_async(&mut self.conn())
+            .await?)
     }
 
     async fn hit(&self, key: &str, window_secs: u64, now: u64) -> Result<u64> {
@@ -313,6 +465,123 @@ impl Store for RedisStore {
             .query_async(&mut self.conn())
             .await?;
         Ok(hits)
+    }
+
+    async fn schedule_relay(
+        &self,
+        relay: &PendingRelay,
+        due: u64,
+        max_pending: usize,
+    ) -> Result<bool> {
+        let stored: i64 = redis::Script::new(SCHEDULE_RELAY)
+            .key(RELAY_DUE)
+            .key(RELAY_ITEMS)
+            .arg(&relay.id)
+            .arg(due)
+            .arg(serde_json::to_string(relay)?)
+            .arg(max_pending)
+            .invoke_async(&mut self.conn())
+            .await?;
+        Ok(stored == 1)
+    }
+
+    async fn due_relays(
+        &self,
+        now: u64,
+        lease_secs: u64,
+        limit: usize,
+    ) -> Result<Vec<PendingRelay>> {
+        let relays: Vec<String> = redis::Script::new(DUE_RELAYS)
+            .key(RELAY_DUE)
+            .key(RELAY_ITEMS)
+            .arg(now)
+            .arg(now + lease_secs)
+            .arg(limit)
+            .invoke_async(&mut self.conn())
+            .await?;
+        relays
+            .iter()
+            .map(|relay| Ok(serde_json::from_str(relay)?))
+            .collect()
+    }
+
+    async fn finish_relay(&self, id: &str) -> Result<()> {
+        let _: () = redis::pipe()
+            .atomic()
+            .zrem(RELAY_DUE, id)
+            .ignore()
+            .hdel(RELAY_ITEMS, id)
+            .ignore()
+            .query_async(&mut self.conn())
+            .await?;
+        Ok(())
+    }
+
+    async fn set_device(
+        &self,
+        mediation: &str,
+        service: Service,
+        device: Option<&Device>,
+    ) -> Result<()> {
+        let key = devices_key(mediation);
+        let mut conn = self.conn();
+        match device {
+            Some(device) => {
+                let _: () = conn
+                    .hset(key, service.as_str(), serde_json::to_string(device)?)
+                    .await?;
+            }
+            None => {
+                let _: () = conn.hdel(key, service.as_str()).await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn devices(&self, mediation: &str) -> Result<Vec<(Service, Device)>> {
+        let all: std::collections::HashMap<String, String> =
+            self.conn().hgetall(devices_key(mediation)).await?;
+        let mut devices = Vec::with_capacity(all.len());
+        for (service, device) in all {
+            let Some(service) = Service::parse(&service) else {
+                continue;
+            };
+            devices.push((service, serde_json::from_str(&device)?));
+        }
+        devices.sort_by_key(|(service, _)| *service);
+        Ok(devices)
+    }
+
+    async fn remove_device(&self, mediation: &str, service: Service, token: &str) -> Result<()> {
+        let _: i64 = redis::Script::new(REMOVE_DEVICE)
+            .key(devices_key(mediation))
+            .arg(service.as_str())
+            .arg(token)
+            .invoke_async(&mut self.conn())
+            .await?;
+        Ok(())
+    }
+
+    async fn claim_push(&self, mediation: &str, now: u64, hold_secs: u64) -> Result<bool> {
+        let reply: Option<String> = redis::cmd("SET")
+            .arg(push_sent_key(mediation))
+            .arg(now)
+            .arg("NX")
+            .arg("EX")
+            .arg(hold_secs.max(1))
+            .query_async(&mut self.conn())
+            .await?;
+        Ok(reply.is_some())
+    }
+
+    async fn release_push(&self, mediation: &str, now: u64, min_interval_secs: u64) -> Result<()> {
+        let _: i64 = redis::Script::new(RELEASE_PUSH)
+            .key(push_sent_key(mediation))
+            .arg(now)
+            .arg(min_interval_secs)
+            .invoke_async(&mut self.conn())
+            .await?;
+        Ok(())
     }
 }
 
@@ -328,7 +597,12 @@ mod tests {
             eprintln!("ALMENA_TEST_REDIS_URL not set; skipping the Redis store test");
             return;
         };
-        let store = RedisStore::connect(&url).await.unwrap();
+        let password = std::env::var("ALMENA_REDIS_PASSWORD")
+            .ok()
+            .filter(|p| !p.is_empty());
+        let store = RedisStore::connect(&url, password.as_deref())
+            .await
+            .unwrap();
         super::super::contract::run(&store).await;
     }
 }

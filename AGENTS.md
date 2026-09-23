@@ -1,7 +1,7 @@
 # almena-mediator — notes for contributors and agents
 
 Server of Almena Network, a decentralised messaging platform based on DIDComm Messaging v2.0
-(https://identity.foundation/didcomm-messaging/spec/v2.0/). DIDs follow W3C DID (https://www.w3.org/TR/did/). Phases 1–4 of docs/didcomm.md are done: the DIDComm library, the mediator skeleton, mediation, and live delivery / invitations / federation.
+(https://identity.foundation/didcomm-messaging/spec/v2.0/). DIDs follow W3C DID (https://www.w3.org/TR/did/). Phases 1–5 of docs/didcomm.md are done: the DIDComm library, the mediator skeleton, mediation, live delivery / invitations / federation, and push wake-ups.
 
 This project is independent: it has its own Docker Compose file, env file and tooling.
 It shares nothing with `../wallet` except the protocol; the wallet may later depend on the `almena-didcomm` crate (see docs/didcomm.md).
@@ -10,12 +10,15 @@ It shares nothing with `../wallet` except the protocol; the wallet may later dep
 
 Cargo workspace:
 
-- `crates/didcomm/` — `almena-didcomm`: DIDComm v2.0 library (keys, JWS, JWE anoncrypt/authcrypt, messages, pack/unpack, `did:key`/`did:peer` resolution). No HTTP or storage.
+- `crates/didcomm/` — `almena-didcomm`: DIDComm v2.0 library (keys, JWS, JWE anoncrypt/authcrypt, messages, pack/unpack, `did:key`/`did:peer` resolution, possession proofs). No HTTP or storage.
   - `tests/spec/appendix.json` — the spec's Appendix A–C test vectors (errata noted in the file).
+- `crates/interop/` — `almena-interop`, tests only: `almena-didcomm` and the mediator against didcomm-rust (SICPA) and Affinidi's DIDComm library, both ways. Nothing else depends on it.
+- `interop/veramo/` — a Veramo client run against a live mediator (`node check.ts`); Veramo does not conform yet, see docs/didcomm.md §3.
 - `crates/mediator/` — `almena-mediator`: the service.
   - `config` reads `ALMENA_*` env vars; `identity` holds the mediator's `did:web`, keys (`ALMENA_KEYS_PATH`) and DID document.
   - `store/`: the `Store` trait with Redis and in-memory implementations, and a contract test both must pass.
-  - `dispatch/`: unpacks what reaches `/didcomm` or `/ws` and dispatches — `protocols.rs` (Trust Ping, Discover Features, problem reports), `mediation.rs` (Coordinate Mediation, `forward`), `pickup.rs` (Message Pickup), `live.rs` (live-delivery sessions), `relay.rs` (forwarding to other mediators).
+  - `dispatch/`: unpacks what reaches `/didcomm` or `/ws` and dispatches — `protocols.rs` (Trust Ping, Discover Features, problem reports), `mediation.rs` (Coordinate Mediation, `forward`), `pickup.rs` (Message Pickup), `live.rs` (live-delivery sessions), `relay.rs` (forwarding to other mediators), `devices.rs` (push protocols: device registration).
+  - `push/`: wake-ups through FCM (`fcm.rs`) and APNs (`apns.rs`), coalescing, the `Pusher` trait.
   - `transport.rs`: outbound HTTPS with the SSRF guard, and the `did:web` resolver. `oob.rs`: the Out-of-Band invitation.
   - `routes` is the axum router: HTTP and WebSocket endpoints, rate limit, HTTP status mapping.
   - `src/main.rs`: logging, start-up, graceful shutdown, `healthcheck` subcommand. `testing.rs` has a test mediator and wallets.

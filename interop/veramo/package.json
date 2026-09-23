@@ -1,0 +1,21 @@
+{
+  "name": "almena-interop-veramo",
+  "private": true,
+  "description": "Interoperability check: a Veramo DIDComm v2 client against a running Almena mediator",
+  "type": "module",
+  "scripts": {
+    "check": "node --experimental-strip-types check.ts"
+  },
+  "dependencies": {
+    "@veramo/core": "^7.0.1",
+    "@veramo/did-comm": "^7.0.1",
+    "@veramo/did-manager": "^7.0.1",
+    "@veramo/did-provider-peer": "^7.0.1",
+    "@veramo/did-resolver": "^7.0.1",
+    "@veramo/key-manager": "^7.0.1",
+    "@veramo/kms-local": "^7.0.1",
+    "@veramo/message-handler": "^7.0.1",
+    "did-resolver": "^6.0.0",
+    "web-did-resolver": "^2.0.32"
+  }
+}

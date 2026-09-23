@@ -6,3 +6,5 @@ Dockerfile
 compose.yml
 .env
 .env.example
+secrets
+interop

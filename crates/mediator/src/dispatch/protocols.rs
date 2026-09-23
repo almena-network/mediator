@@ -4,6 +4,8 @@
 use almena_didcomm::Message;
 use serde_json::{Value, json};
 
+use crate::push::Service;
+
 pub const PING: &str = "https://didcomm.org/trust-ping/2.0/ping";
 pub const PING_RESPONSE: &str = "https://didcomm.org/trust-ping/2.0/ping-response";
 pub const QUERIES: &str = "https://didcomm.org/discover-features/2.0/queries";
@@ -26,6 +28,24 @@ pub const DELIVERY_REQUEST: &str = "https://didcomm.org/messagepickup/3.0/delive
 pub const DELIVERY: &str = "https://didcomm.org/messagepickup/3.0/delivery";
 pub const MESSAGES_RECEIVED: &str = "https://didcomm.org/messagepickup/3.0/messages-received";
 pub const LIVE_DELIVERY_CHANGE: &str = "https://didcomm.org/messagepickup/3.0/live-delivery-change";
+
+pub const PUSH_FCM: &str = "https://didcomm.org/push-notifications-fcm/1.0/";
+pub const PUSH_APNS: &str = "https://didcomm.org/push-notifications-apns/1.0/";
+/// Message names shared by both push protocols.
+pub const SET_DEVICE_INFO: &str = "set-device-info";
+pub const GET_DEVICE_INFO: &str = "get-device-info";
+pub const DEVICE_INFO: &str = "device-info";
+/// The `ack` of Aries RFC 0015, which the push protocols answer
+/// `set-device-info` with.
+pub const ACK: &str = "https://didcomm.org/notification/1.0/ack";
+
+/// The push protocol of `service`, with the trailing `/` of a message type.
+pub fn push_protocol(service: Service) -> &'static str {
+    match service {
+        Service::Fcm => PUSH_FCM,
+        Service::Apns => PUSH_APNS,
+    }
+}
 
 /// Feature of the mediator, as disclosed by Discover Features.
 struct Feature {
@@ -82,9 +102,14 @@ pub fn trust_ping(ping: &Message) -> Option<Message> {
     wanted.then(|| Message::new(PING_RESPONSE, json!({})).reply_to(ping))
 }
 
-/// Discover Features: a `disclose` listing the features that match any query.
-/// Unknown feature types match nothing, as the protocol requires.
-pub fn discover_features(request: &Message, max_receive_bytes: usize) -> Result<Message, Problem> {
+/// Discover Features: a `disclose` listing the features that match any query,
+/// including the push protocols of the services in `push`. Unknown feature
+/// types match nothing, as the protocol requires.
+pub fn discover_features(
+    request: &Message,
+    max_receive_bytes: usize,
+    push: &[Service],
+) -> Result<Message, Problem> {
     let queries = request
         .body
         .get("queries")
@@ -108,6 +133,18 @@ pub fn discover_features(request: &Message, max_receive_bytes: usize) -> Result<
                 disclosure["roles"] = json!(feature.roles);
             }
             disclosures.push(disclosure);
+        }
+        if feature_type == "protocol" {
+            for service in push {
+                let id = push_protocol(*service).trim_end_matches('/');
+                if matches(pattern, id) {
+                    disclosures.push(json!({
+                        "feature-type": "protocol",
+                        "id": id,
+                        "roles": ["notification-sender"],
+                    }));
+                }
+            }
         }
         if feature_type == "constraint" && matches(pattern, "max_receive_bytes") {
             disclosures.push(json!({
@@ -243,7 +280,7 @@ mod tests {
                 {"feature-type": "unknown", "match": "*"}
             ]}),
         );
-        let disclose = discover_features(&queries, 65536).unwrap();
+        let disclose = discover_features(&queries, 65536, &[]).unwrap();
         assert_eq!(disclose.thid.as_deref(), Some(queries.id.as_str()));
         let disclosures = disclose.body["disclosures"].as_array().unwrap();
         assert_eq!(disclosures.len(), 2);
@@ -255,7 +292,7 @@ mod tests {
     fn discover_features_rejects_a_bad_body() {
         let queries = Message::new(QUERIES, json!({"queries": "all"}));
         assert_eq!(
-            discover_features(&queries, 1).unwrap_err(),
+            discover_features(&queries, 1, &[]).unwrap_err(),
             Problem::InvalidBody
         );
     }

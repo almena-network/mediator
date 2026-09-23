@@ -105,6 +105,11 @@ tasks:
     cmds:
       - docker compose down
 
+  down:volume:
+    desc: Stop and remove the Docker containers and their volumes (deletes the Redis data)
+    cmds:
+      - docker compose down --volumes --remove-orphans
+
   logs:
     desc: Follow the mediator's container logs
     cmds:

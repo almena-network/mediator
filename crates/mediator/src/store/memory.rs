@@ -1,13 +1,17 @@
 //! In-process [`Store`]: everything is lost on restart. For tests and local
 //! development only.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Mutex;
 
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 
-use super::{AddRecipient, QueueLimits, QueueSummary, Queued, RemoveRecipient, Store, id_millis};
+use super::{
+    AddRecipient, PendingRelay, QueueLimits, QueueSummary, Queued, RemoveRecipient, Store,
+    id_millis,
+};
+use crate::push::{Device, Service};
 
 #[derive(Default)]
 pub struct MemoryStore {
@@ -24,6 +28,11 @@ struct Inner {
     /// Key → (window, hits).
     hits: HashMap<String, (u64, u64)>,
     seq: u64,
+    devices: HashMap<String, BTreeMap<Service, Device>>,
+    /// Mediation → (when the last push went, when the marker lapses).
+    push_sent: HashMap<String, (u64, u64)>,
+    /// Relay id → (when it is due, the relay).
+    relays: BTreeMap<String, (u64, PendingRelay)>,
 }
 
 impl MemoryStore {
@@ -130,7 +139,8 @@ impl Store for MemoryStore {
         inner.seq += 1;
         let id = format!("{}-{}", now * 1000, inner.seq);
         let queue = inner.queue(mediation, now, limits.ttl_secs);
-        if queue.len() >= limits.max_messages {
+        let bytes: u64 = queue.iter().map(|q| q.message.len() as u64).sum();
+        if queue.len() >= limits.max_messages || bytes + message.len() as u64 > limits.max_bytes {
             return Ok(None);
         }
         queue.push(Queued {
@@ -205,6 +215,107 @@ impl Store for MemoryStore {
         entry.1 += 1;
         Ok(entry.1)
     }
+
+    async fn schedule_relay(
+        &self,
+        relay: &PendingRelay,
+        due: u64,
+        max_pending: usize,
+    ) -> Result<bool> {
+        let mut inner = self.lock()?;
+        if !inner.relays.contains_key(&relay.id) && inner.relays.len() >= max_pending {
+            return Ok(false);
+        }
+        inner.relays.insert(relay.id.clone(), (due, relay.clone()));
+        Ok(true)
+    }
+
+    async fn due_relays(
+        &self,
+        now: u64,
+        lease_secs: u64,
+        limit: usize,
+    ) -> Result<Vec<PendingRelay>> {
+        let mut inner = self.lock()?;
+        let mut due: Vec<_> = inner
+            .relays
+            .values_mut()
+            .filter(|(at, _)| *at <= now)
+            .collect();
+        due.sort_by_key(|(at, _)| *at);
+        Ok(due
+            .into_iter()
+            .take(limit)
+            .map(|(at, relay)| {
+                *at = now + lease_secs;
+                relay.clone()
+            })
+            .collect())
+    }
+
+    async fn finish_relay(&self, id: &str) -> Result<()> {
+        self.lock()?.relays.remove(id);
+        Ok(())
+    }
+
+    async fn set_device(
+        &self,
+        mediation: &str,
+        service: Service,
+        device: Option<&Device>,
+    ) -> Result<()> {
+        let mut inner = self.lock()?;
+        let devices = inner.devices.entry(mediation.to_owned()).or_default();
+        match device {
+            Some(device) => devices.insert(service, device.clone()),
+            None => devices.remove(&service),
+        };
+        Ok(())
+    }
+
+    async fn devices(&self, mediation: &str) -> Result<Vec<(Service, Device)>> {
+        Ok(self
+            .lock()?
+            .devices
+            .get(mediation)
+            .map(|devices| devices.iter().map(|(s, d)| (*s, d.clone())).collect())
+            .unwrap_or_default())
+    }
+
+    async fn remove_device(&self, mediation: &str, service: Service, token: &str) -> Result<()> {
+        if let Some(devices) = self.lock()?.devices.get_mut(mediation)
+            && devices.get(&service).is_some_and(|d| d.token == token)
+        {
+            devices.remove(&service);
+        }
+        Ok(())
+    }
+
+    async fn claim_push(&self, mediation: &str, now: u64, hold_secs: u64) -> Result<bool> {
+        let mut inner = self.lock()?;
+        if inner
+            .push_sent
+            .get(mediation)
+            .is_some_and(|&(_, until)| now < until)
+        {
+            return Ok(false);
+        }
+        inner
+            .push_sent
+            .insert(mediation.to_owned(), (now, now.saturating_add(hold_secs)));
+        Ok(true)
+    }
+
+    async fn release_push(&self, mediation: &str, now: u64, min_interval_secs: u64) -> Result<()> {
+        let mut inner = self.lock()?;
+        if let Some((sent, until)) = inner.push_sent.get_mut(mediation) {
+            *until = (*until).min(sent.saturating_add(min_interval_secs));
+            if *until <= now {
+                inner.push_sent.remove(mediation);
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -222,6 +333,7 @@ mod tests {
         let limits = QueueLimits {
             ttl_secs: 60,
             max_messages: 10,
+            max_bytes: 1024,
         };
         store.enqueue("m", "r", "old", 1_000, limits).await.unwrap();
         store.enqueue("m", "r", "new", 1_050, limits).await.unwrap();

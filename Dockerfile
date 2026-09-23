@@ -8,11 +8,12 @@ WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY crates/didcomm/Cargo.toml crates/didcomm/
 COPY crates/mediator/Cargo.toml crates/mediator/
-RUN mkdir -p crates/didcomm/src crates/mediator/src \
-    && touch crates/didcomm/src/lib.rs crates/mediator/src/lib.rs \
+COPY crates/interop/Cargo.toml crates/interop/
+RUN mkdir -p crates/didcomm/src crates/mediator/src crates/interop/src \
+    && touch crates/didcomm/src/lib.rs crates/mediator/src/lib.rs crates/interop/src/lib.rs \
     && echo "fn main() {}" > crates/mediator/src/main.rs \
     && cargo build --release --locked -p almena-mediator \
-    && rm -rf crates/didcomm/src crates/mediator/src
+    && rm -rf crates/didcomm/src crates/mediator/src crates/interop/src
 
 COPY crates ./crates
 RUN touch crates/didcomm/src/lib.rs crates/mediator/src/lib.rs crates/mediator/src/main.rs \

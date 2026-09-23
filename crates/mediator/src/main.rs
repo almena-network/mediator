@@ -2,8 +2,10 @@ use std::sync::Arc;
 
 use std::net::SocketAddr;
 
+use almena_mediator::config::PushMode;
 use almena_mediator::dispatch::{Limits, Mediator};
 use almena_mediator::identity::Identity;
+use almena_mediator::push::{Apns, DirectPusher, Fcm, Pusher};
 use almena_mediator::store::{self, QueueLimits};
 use almena_mediator::transport::{HttpTransport, Transport};
 use almena_mediator::{AppState, Config, config::LogFormat, router};
@@ -20,7 +22,11 @@ async fn main() -> Result<()> {
     init_tracing(config.log_format);
 
     let identity = Identity::load_or_create(&config.keys_path, &config.public_url)?;
-    let store = store::open(&config.redis_url).await?;
+    let store = store::open(
+        &config.redis_url,
+        config.redis_password.as_ref().map(|s| s.0.as_str()),
+    )
+    .await?;
     if store.kind() == "memory" {
         tracing::warn!("in-memory storage: every mediation and queued message is lost on restart");
     }
@@ -29,8 +35,11 @@ async fn main() -> Result<()> {
         queue: QueueLimits {
             ttl_secs: config.queue_ttl_secs,
             max_messages: config.queue_max_messages,
+            max_bytes: config.queue_max_bytes,
         },
         max_recipient_dids: config.max_recipient_dids,
+        push_min_interval_secs: config.push.min_interval_secs,
+        recipient_proof: config.recipient_proof,
     };
     let transport: Option<Arc<dyn Transport>> = if config.federation {
         if config.outbound_allow_insecure {
@@ -44,14 +53,24 @@ async fn main() -> Result<()> {
     } else {
         None
     };
-    let did = identity.did.clone();
+    let mut mediator = Mediator::new(identity, Arc::clone(&store), limits, transport);
+    if config.push.mode == PushMode::Direct {
+        let fcm = config
+            .push
+            .fcm_service_account
+            .as_deref()
+            .map(Fcm::from_file)
+            .transpose()?;
+        let apns = config.push.apns.as_ref().map(Apns::new).transpose()?;
+        let pusher = DirectPusher::new(fcm, apns);
+        let services: Vec<_> = pusher.services().iter().map(|s| s.as_str()).collect();
+        tracing::info!(?services, "push wake-ups on (direct)");
+        mediator = mediator.with_pusher(Arc::new(pusher));
+    }
+    mediator.start_relay_retries();
+    let did = mediator.identity().did.clone();
     let state = AppState {
-        mediator: Arc::new(Mediator::new(
-            identity,
-            Arc::clone(&store),
-            limits,
-            transport,
-        )),
+        mediator: Arc::new(mediator),
         store,
         rate_limit: config.rate_limit,
         public_url: config.public_url.clone(),

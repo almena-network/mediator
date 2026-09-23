@@ -4,6 +4,7 @@ pub mod config;
 pub mod dispatch;
 pub mod identity;
 pub mod oob;
+pub mod push;
 pub mod routes;
 pub mod store;
 #[cfg(test)]

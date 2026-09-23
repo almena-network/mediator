@@ -4,26 +4,32 @@
 //! The payload is routed as a sender would route it: resolve `next`, wrap it
 //! for the hops its `DIDCommMessaging` service lists, POST it to the service
 //! URI. The first attempt happens before answering; if it fails the payload
-//! is retried in the background with backoff. Retries live in memory only:
-//! a restart drops them.
+//! goes to the store and [`retry_due`] tries it again with backoff, so a
+//! restart loses nothing.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use almena_didcomm::did::did_of;
-use almena_didcomm::{ContentEncryption, route};
+use almena_didcomm::message::now;
+use almena_didcomm::{ContentEncryption, b64, route};
+use sha2::{Digest, Sha256};
 
 use super::{Mediator, ReceiveError};
 use crate::identity::DIDCOMM_PATH;
+use crate::store::{PendingRelay, Store};
 use crate::transport::Transport;
 
-/// Waits before each retry after the first attempt.
-const BACKOFF: [Duration; 4] = [
-    Duration::from_secs(5),
-    Duration::from_secs(30),
-    Duration::from_secs(120),
-    Duration::from_secs(600),
-];
+/// Seconds before each retry after the first attempt.
+const BACKOFF: [u64; 4] = [5, 30, 120, 600];
+/// Relays waiting for a retry, at most: a destination that stays down
+/// must not fill the store with copies.
+const MAX_PENDING: usize = 1000;
+/// How long a relay being tried is kept from other workers.
+const LEASE_SECS: u64 = 60;
+/// Relays tried per round, and how often a round runs.
+const BATCH: usize = 16;
+const TICK: Duration = Duration::from_secs(1);
 
 pub async fn relay(
     mediator: &Mediator,
@@ -58,7 +64,7 @@ pub async fn relay(
         {
             return Err(ReceiveError::UnknownRecipient);
         }
-        deliver(Arc::clone(transport), uri, routed.message).await;
+        deliver(mediator.store(), transport.as_ref(), uri, routed.message).await;
     }
     Ok(())
 }
@@ -74,27 +80,84 @@ fn own_endpoints(mediator: &Mediator) -> Vec<String> {
         .collect()
 }
 
-/// First attempt now; on failure, retries in the background.
-async fn deliver(transport: Arc<dyn Transport>, uri: String, message: String) {
-    match transport.post_didcomm(&uri, &message).await {
-        Ok(()) => tracing::debug!(%uri, "forward relayed"),
+/// First attempt now; on failure, stored for [`retry_due`].
+async fn deliver(store: &dyn Store, transport: &dyn Transport, uri: String, message: String) {
+    let Err(err) = transport.post_didcomm(&uri, &message).await else {
+        tracing::debug!(%uri, "forward relayed");
+        return;
+    };
+    tracing::info!(%uri, error = %format!("{err:#}"), "relay failed, will retry");
+    let relay = PendingRelay {
+        id: relay_id(&uri, &message),
+        uri,
+        message,
+        retries: 0,
+    };
+    match store
+        .schedule_relay(&relay, now() + BACKOFF[0], MAX_PENDING)
+        .await
+    {
+        Ok(true) => {}
+        Ok(false) => tracing::warn!(uri = %relay.uri, "too many relays waiting, dropped"),
         Err(err) => {
-            tracing::info!(%uri, error = %format!("{err:#}"), "relay failed, will retry");
-            tokio::spawn(async move {
-                for (attempt, wait) in BACKOFF.iter().enumerate() {
-                    tokio::time::sleep(*wait).await;
-                    match transport.post_didcomm(&uri, &message).await {
-                        Ok(()) => {
-                            tracing::debug!(%uri, attempt = attempt + 2, "forward relayed");
-                            return;
-                        }
-                        Err(err) => {
-                            tracing::info!(%uri, attempt = attempt + 2, error = %format!("{err:#}"), "relay failed")
-                        }
-                    }
-                }
-                tracing::warn!(%uri, "relay abandoned after retries");
-            });
+            tracing::warn!(uri = %relay.uri, error = %format!("{err:#}"), "could not store relay, dropped");
         }
     }
+}
+
+/// The same payload for the same destination is one relay.
+fn relay_id(uri: &str, message: &str) -> String {
+    let mut hash = Sha256::new();
+    hash.update(uri.as_bytes());
+    hash.update([0]);
+    hash.update(message.as_bytes());
+    b64::encode(hash.finalize())
+}
+
+/// Tries the relays due by `now` once each; the ones that fail again are
+/// rescheduled, or dropped after the last retry.
+pub async fn retry_due(
+    store: &dyn Store,
+    transport: &dyn Transport,
+    now: u64,
+) -> anyhow::Result<()> {
+    for relay in store.due_relays(now, LEASE_SECS, BATCH).await? {
+        let attempt = relay.retries + 2;
+        match transport.post_didcomm(&relay.uri, &relay.message).await {
+            Ok(()) => {
+                tracing::debug!(uri = %relay.uri, attempt, "forward relayed");
+                store.finish_relay(&relay.id).await?;
+            }
+            Err(err) => {
+                let next = relay.retries as usize + 1;
+                if let Some(wait) = BACKOFF.get(next) {
+                    tracing::info!(uri = %relay.uri, attempt, error = %format!("{err:#}"), "relay failed");
+                    let relay = PendingRelay {
+                        retries: relay.retries + 1,
+                        ..relay
+                    };
+                    store
+                        .schedule_relay(&relay, now + wait, MAX_PENDING)
+                        .await?;
+                } else {
+                    tracing::warn!(uri = %relay.uri, attempt, error = %format!("{err:#}"), "relay abandoned after retries");
+                    store.finish_relay(&relay.id).await?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Runs [`retry_due`] every second until the process ends.
+pub fn spawn_retries(store: Arc<dyn Store>, transport: Arc<dyn Transport>) {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(TICK);
+        loop {
+            tick.tick().await;
+            if let Err(err) = retry_due(store.as_ref(), transport.as_ref(), now()).await {
+                tracing::warn!(error = %format!("{err:#}"), "relay retries failed");
+            }
+        }
+    });
 }
