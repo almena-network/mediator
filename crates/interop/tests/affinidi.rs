@@ -277,6 +277,7 @@ const LIMITS: Limits = Limits {
     max_recipient_dids: 3,
     push_min_interval_secs: 60,
     recipient_proof: true,
+    mediation_ttl_secs: 0,
 };
 
 /// The mediator's key agreement key on `curve`, as a kid and Affinidi key.

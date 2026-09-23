@@ -203,7 +203,11 @@ async fn over_limit(state: &AppState, ip: Option<IpAddr>) -> bool {
         )
         .await
     {
-        Ok(hits) => hits > state.rate_limit,
+        Ok(hits) if hits > state.rate_limit => {
+            crate::metrics::METRICS.rate_limited();
+            true
+        }
+        Ok(_) => false,
         Err(err) => {
             tracing::warn!(error = %format!("{err:#}"), "rate limit check failed");
             false

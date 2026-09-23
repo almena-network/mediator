@@ -22,6 +22,7 @@ pub const LIMITS: Limits = Limits {
     push_min_interval_secs: 0,
     // Off so tests can register any DID; the proof has tests of its own.
     recipient_proof: false,
+    mediation_ttl_secs: 90 * 24 * 3600,
 };
 
 /// A mediator at `https://mediator.example.com` with an empty in-memory store.

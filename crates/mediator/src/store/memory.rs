@@ -33,6 +33,8 @@ struct Inner {
     push_sent: HashMap<String, (u64, u64)>,
     /// Relay id → (when it is due, the relay).
     relays: BTreeMap<String, (u64, PendingRelay)>,
+    /// Mediation → when its wallet was last active.
+    seen: HashMap<String, u64>,
 }
 
 impl MemoryStore {
@@ -67,9 +69,41 @@ impl Store for MemoryStore {
         "memory"
     }
 
-    async fn grant_mediation(&self, mediation: &str, _now: u64) -> Result<()> {
-        self.lock()?.mediations.insert(mediation.to_owned());
+    async fn grant_mediation(&self, mediation: &str, now: u64) -> Result<()> {
+        let mut inner = self.lock()?;
+        inner.mediations.insert(mediation.to_owned());
+        inner.seen.insert(mediation.to_owned(), now);
         Ok(())
+    }
+
+    async fn touch_mediation(&self, mediation: &str, now: u64) -> Result<()> {
+        let mut inner = self.lock()?;
+        if inner.mediations.contains(mediation) {
+            inner.seen.insert(mediation.to_owned(), now);
+        }
+        Ok(())
+    }
+
+    async fn remove_idle_mediations(&self, cutoff: u64, limit: usize) -> Result<Vec<String>> {
+        let mut inner = self.lock()?;
+        let idle: Vec<String> = inner
+            .seen
+            .iter()
+            .filter(|(_, seen)| **seen <= cutoff)
+            .map(|(m, _)| m.clone())
+            .take(limit)
+            .collect();
+        for mediation in &idle {
+            inner.seen.remove(mediation);
+            inner.mediations.remove(mediation);
+            for recipient in inner.recipients.remove(mediation).unwrap_or_default() {
+                inner.owners.remove(&recipient);
+            }
+            inner.queues.remove(mediation);
+            inner.devices.remove(mediation);
+            inner.push_sent.remove(mediation);
+        }
+        Ok(idle)
     }
 
     async fn has_mediation(&self, mediation: &str) -> Result<bool> {

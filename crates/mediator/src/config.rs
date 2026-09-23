@@ -11,6 +11,9 @@ use crate::push::ApnsConfig;
 pub struct Config {
     /// Address the HTTP server binds to (`ALMENA_HOST`, `ALMENA_PORT`).
     pub bind: SocketAddr,
+    /// Address of the Prometheus metrics listener (`ALMENA_METRICS_ADDR`,
+    /// e.g. `127.0.0.1:9090`); unset: no metrics. Keep it off the public proxy.
+    pub metrics_addr: Option<SocketAddr>,
     /// Log output format (`ALMENA_LOG_FORMAT`: `pretty` or `json`).
     pub log_format: LogFormat,
     /// Public origin of the mediator, `scheme://host[:port]` without path
@@ -35,6 +38,9 @@ pub struct Config {
     pub queue_max_bytes: u64,
     /// Recipient DIDs per mediation (`ALMENA_MAX_RECIPIENT_DIDS`).
     pub max_recipient_dids: usize,
+    /// A mediation whose wallet sends nothing for this many seconds is removed
+    /// with everything it owns; 0 keeps them forever (`ALMENA_MEDIATION_TTL`).
+    pub mediation_ttl_secs: u64,
     /// Registering someone else's DID needs a possession proof
     /// (`ALMENA_RECIPIENT_PROOF`: `required` or `off`).
     pub recipient_proof: bool,
@@ -108,6 +114,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             bind: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 8080),
+            metrics_addr: None,
             log_format: LogFormat::Pretty,
             public_url: "http://localhost:8080".to_owned(),
             keys_path: PathBuf::from("data/keys.json"),
@@ -119,6 +126,7 @@ impl Default for Config {
             queue_max_bytes: 100 * 1024 * 1024,
             max_recipient_dids: 100,
             recipient_proof: true,
+            mediation_ttl_secs: 90 * 24 * 3600,
             rate_limit: 60,
             client_ip_header: None,
             federation: true,
@@ -175,6 +183,14 @@ impl Config {
 
         let config = Self {
             bind: SocketAddr::new(host, port),
+            metrics_addr: match lookup("ALMENA_METRICS_ADDR").filter(|v| !v.trim().is_empty()) {
+                Some(v) => Some(
+                    v.trim()
+                        .parse()
+                        .with_context(|| format!("invalid ALMENA_METRICS_ADDR: {v}"))?,
+                ),
+                None => None,
+            },
             log_format,
             public_url,
             keys_path: lookup("ALMENA_KEYS_PATH").map_or(default.keys_path, PathBuf::from),
@@ -199,6 +215,12 @@ impl Config {
                 "ALMENA_MAX_RECIPIENT_DIDS",
                 default.max_recipient_dids,
             )?,
+            mediation_ttl_secs: match lookup("ALMENA_MEDIATION_TTL") {
+                Some(v) => v
+                    .parse()
+                    .with_context(|| format!("invalid ALMENA_MEDIATION_TTL: {v}"))?,
+                None => default.mediation_ttl_secs,
+            },
             recipient_proof: match lookup("ALMENA_RECIPIENT_PROOF").as_deref().map(str::trim) {
                 None | Some("required") => true,
                 Some("off") => false,
@@ -323,6 +345,7 @@ mod tests {
         let config = Config::from_lookup(lookup(&[
             ("ALMENA_HOST", "127.0.0.1"),
             ("ALMENA_PORT", "9000"),
+            ("ALMENA_METRICS_ADDR", "127.0.0.1:9090"),
             ("ALMENA_LOG_FORMAT", "json"),
             ("ALMENA_PUBLIC_URL", "https://mediator.example.com/"),
             ("ALMENA_KEYS_PATH", "/data/keys.json"),
@@ -334,6 +357,7 @@ mod tests {
             ("ALMENA_QUEUE_MAX_BYTES", "4096"),
             ("ALMENA_MAX_RECIPIENT_DIDS", "7"),
             ("ALMENA_RECIPIENT_PROOF", "off"),
+            ("ALMENA_MEDIATION_TTL", "0"),
             ("ALMENA_RATE_LIMIT", "0"),
             ("ALMENA_CLIENT_IP_HEADER", "X-Forwarded-For"),
             ("ALMENA_FEDERATION", "false"),
@@ -341,6 +365,7 @@ mod tests {
         ]))
         .unwrap();
         assert_eq!(config.bind, "127.0.0.1:9000".parse().unwrap());
+        assert_eq!(config.metrics_addr, Some("127.0.0.1:9090".parse().unwrap()));
         assert_eq!(config.log_format, LogFormat::Json);
         assert_eq!(config.public_url, "https://mediator.example.com");
         assert_eq!(config.keys_path, PathBuf::from("/data/keys.json"));
@@ -353,6 +378,7 @@ mod tests {
         assert_eq!(config.queue_max_bytes, 4096);
         assert_eq!(config.max_recipient_dids, 7);
         assert!(!config.recipient_proof);
+        assert_eq!(config.mediation_ttl_secs, 0);
         assert_eq!(config.rate_limit, 0);
         assert_eq!(config.client_ip_header.as_deref(), Some("x-forwarded-for"));
         assert!(!config.federation);

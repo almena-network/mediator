@@ -16,8 +16,18 @@ use tracing_subscriber::EnvFilter;
 #[tokio::main]
 async fn main() -> Result<()> {
     let config = Config::from_env()?;
-    if std::env::args().nth(1).as_deref() == Some("healthcheck") {
-        return healthcheck(&config);
+    match std::env::args().nth(1).as_deref() {
+        Some("healthcheck") => return healthcheck(&config),
+        Some("rotate-keys") => {
+            Identity::rotate(&config.keys_path)?;
+            println!(
+                "New mediator keys written to {}. Restart the mediator to use them; \
+                 messages encrypted to the old keys will be refused.",
+                config.keys_path.display()
+            );
+            return Ok(());
+        }
+        _ => {}
     }
     init_tracing(config.log_format);
 
@@ -40,6 +50,7 @@ async fn main() -> Result<()> {
         max_recipient_dids: config.max_recipient_dids,
         push_min_interval_secs: config.push.min_interval_secs,
         recipient_proof: config.recipient_proof,
+        mediation_ttl_secs: config.mediation_ttl_secs,
     };
     let transport: Option<Arc<dyn Transport>> = if config.federation {
         if config.outbound_allow_insecure {
@@ -68,6 +79,7 @@ async fn main() -> Result<()> {
         mediator = mediator.with_pusher(Arc::new(pusher));
     }
     mediator.start_relay_retries();
+    mediator.start_cleanup();
     let did = mediator.identity().did.clone();
     let state = AppState {
         mediator: Arc::new(mediator),
@@ -81,6 +93,9 @@ async fn main() -> Result<()> {
             .transpose()?,
     };
 
+    if let Some(addr) = config.metrics_addr {
+        almena_mediator::metrics::serve(addr).await?;
+    }
     let listener = TcpListener::bind(config.bind).await?;
     tracing::info!(addr = %listener.local_addr()?, %did, version = env!("CARGO_PKG_VERSION"), "almena mediator listening");
 

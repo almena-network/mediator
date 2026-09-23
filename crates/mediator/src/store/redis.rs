@@ -5,6 +5,7 @@
 //! | Key | Type | Holds |
 //! |---|---|---|
 //! | `mediation:{M}` | string | Grant time (epoch seconds) |
+//! | `mediations:seen` | sorted set | Mediations by when their wallet was last active |
 //! | `mediation:{M}:recipients` | set | Recipient DIDs registered by `M` |
 //! | `recipient:{R}` | string | The mediation that registered `R` |
 //! | `mediation:{M}:queue` | stream | One entry per queued message: `r` recipient, `s` size in bytes |
@@ -142,6 +143,35 @@ else
   if ttl < 0 or left < ttl then redis.call('EXPIRE', KEYS[1], left) end
 end
 return 0
+";
+
+const SEEN: &str = "mediations:seen";
+
+/// KEYS[1] mediation, KEYS[2] seen set; ARGV: mediation, now.
+const TOUCH: &str = r"
+if redis.call('EXISTS', KEYS[1]) == 1 then
+  redis.call('ZADD', KEYS[2], ARGV[2], ARGV[1])
+end
+return 0
+";
+
+/// KEYS: mediation, recipients, queue, byte counter, devices, push marker,
+/// seen set; ARGV: mediation, cutoff, recipient key prefix, body key prefix.
+/// Checks again that the mediation is idle, then deletes all it owns.
+const REMOVE_MEDIATION: &str = r"
+local seen = redis.call('ZSCORE', KEYS[7], ARGV[1])
+if seen and tonumber(seen) > tonumber(ARGV[2]) then return 0 end
+for _, recipient in ipairs(redis.call('SMEMBERS', KEYS[2])) do
+  if redis.call('GET', ARGV[3] .. recipient) == ARGV[1] then
+    redis.call('DEL', ARGV[3] .. recipient)
+  end
+end
+for _, entry in ipairs(redis.call('XRANGE', KEYS[3], '-', '+')) do
+  redis.call('DEL', ARGV[4] .. entry[1])
+end
+redis.call('DEL', KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5], KEYS[6])
+redis.call('ZREM', KEYS[7], ARGV[1])
+return 1
 ";
 
 const RELAY_DUE: &str = "relay:due";
@@ -286,14 +316,63 @@ impl Store for RedisStore {
     }
 
     async fn grant_mediation(&self, mediation: &str, now: u64) -> Result<()> {
-        let _: bool = redis::cmd("SET")
+        let _: () = redis::pipe()
+            .atomic()
+            .cmd("SET")
             .arg(mediation_key(mediation))
             .arg(now)
             .arg("NX")
+            .ignore()
+            .zadd(SEEN, mediation, now)
+            .ignore()
             .query_async(&mut self.conn())
-            .await
-            .map(|reply: Option<String>| reply.is_some())?;
+            .await?;
         Ok(())
+    }
+
+    async fn touch_mediation(&self, mediation: &str, now: u64) -> Result<()> {
+        let _: i64 = redis::Script::new(TOUCH)
+            .key(mediation_key(mediation))
+            .key(SEEN)
+            .arg(mediation)
+            .arg(now)
+            .invoke_async(&mut self.conn())
+            .await?;
+        Ok(())
+    }
+
+    async fn remove_idle_mediations(&self, cutoff: u64, limit: usize) -> Result<Vec<String>> {
+        let idle: Vec<String> = redis::cmd("ZRANGE")
+            .arg(SEEN)
+            .arg("-inf")
+            .arg(cutoff)
+            .arg("BYSCORE")
+            .arg("LIMIT")
+            .arg(0)
+            .arg(limit)
+            .query_async(&mut self.conn())
+            .await?;
+        let mut removed = Vec::with_capacity(idle.len());
+        for mediation in idle {
+            let gone: i64 = redis::Script::new(REMOVE_MEDIATION)
+                .key(mediation_key(&mediation))
+                .key(recipients_key(&mediation))
+                .key(queue_key(&mediation))
+                .key(bytes_key(&mediation))
+                .key(devices_key(&mediation))
+                .key(push_sent_key(&mediation))
+                .key(SEEN)
+                .arg(&mediation)
+                .arg(cutoff)
+                .arg(recipient_key(""))
+                .arg(body_prefix(&mediation))
+                .invoke_async(&mut self.conn())
+                .await?;
+            if gone == 1 {
+                removed.push(mediation);
+            }
+        }
+        Ok(removed)
     }
 
     async fn has_mediation(&self, mediation: &str) -> Result<bool> {

@@ -105,6 +105,21 @@ impl Identity {
         Self::new(keys, public_url)
     }
 
+    /// Replaces the keys in `path` with fresh ones (`almena-mediator
+    /// rotate-keys`). The DID stays; its key ids now name the new keys, so
+    /// whatever was encrypted to the old ones stops opening at once. A
+    /// running mediator keeps the old keys until it restarts.
+    pub fn rotate(path: &Path) -> Result<()> {
+        anyhow::ensure!(
+            path.exists(),
+            "no mediator keys at {} to rotate",
+            path.display()
+        );
+        Keys::generate()?
+            .write(path)
+            .with_context(|| format!("writing mediator keys to {}", path.display()))
+    }
+
     /// An identity with fresh keys that are not saved anywhere.
     pub fn ephemeral(public_url: &str) -> Result<Self> {
         Self::new(Keys::generate()?, public_url)
@@ -198,6 +213,26 @@ mod tests {
         assert_eq!(endpoints[0].uri, "http://localhost:8080/didcomm");
         assert_eq!(endpoints[0].accept, ["didcomm/v2"]);
         assert_eq!(endpoints[1].uri, "ws://localhost:8080/ws");
+    }
+
+    #[test]
+    fn rotation_replaces_every_key_and_keeps_the_did() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("keys.json");
+        assert!(Identity::rotate(&path).is_err(), "nothing to rotate yet");
+        let before = Identity::load_or_create(&path, "https://mediator.example.com").unwrap();
+        Identity::rotate(&path).unwrap();
+        let after = Identity::load_or_create(&path, "https://mediator.example.com").unwrap();
+        assert_eq!(before.did, after.did);
+        for (old, new) in before
+            .document
+            .verification_method
+            .iter()
+            .zip(&after.document.verification_method)
+        {
+            assert_eq!(old.id, new.id);
+            assert_ne!(old.key, new.key, "{} was not rotated", old.id);
+        }
     }
 
     #[test]

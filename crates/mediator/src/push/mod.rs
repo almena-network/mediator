@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 
 pub use self::apns::{Apns, ApnsConfig};
 pub use self::fcm::Fcm;
+use crate::metrics::{METRICS, Push};
 use crate::store::Store;
 
 /// The `type` of every push payload. Nothing else is sent.
@@ -139,14 +140,17 @@ pub async fn wake(
         match pusher.wake(service, &device.token).await {
             Ok(Sent::Delivered) => {
                 tracing::debug!(%mediation, service = service.as_str(), "push sent");
+                METRICS.push(service, Push::Delivered);
             }
             Ok(Sent::InvalidToken) => {
+                METRICS.push(service, Push::InvalidToken);
                 tracing::info!(%mediation, service = service.as_str(), "push token rejected, removed");
                 store
                     .remove_device(mediation, service, &device.token)
                     .await?;
             }
             Err(err) => {
+                METRICS.push(service, Push::Failed);
                 tracing::warn!(%mediation, service = service.as_str(), error = %format!("{err:#}"), "push failed");
             }
         }

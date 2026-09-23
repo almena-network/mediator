@@ -34,6 +34,7 @@ curl localhost:8080/health
 | `ALMENA_QUEUE_MAX_BYTES`   | `104857600`              | Bytes of queued messages per mediation (100 MiB)               |
 | `ALMENA_MAX_RECIPIENT_DIDS`| `100`                    | Registered recipient DIDs per mediation                        |
 | `ALMENA_RECIPIENT_PROOF`   | `required`               | Registering another DID needs a proof signed by it (`off` to disable); see docs/didcomm.md §4 |
+| `ALMENA_MEDIATION_TTL`     | `7776000`                | Seconds without activity after which a mediation and all it owns are removed (90 days); `0` = never |
 | `ALMENA_RATE_LIMIT`        | `60`                     | `POST /didcomm` per minute per client IP; `0` = off            |
 | `ALMENA_CLIENT_IP_HEADER`  | —                        | Behind a proxy: header with the client IP (e.g. `x-forwarded-for`) |
 | `ALMENA_FEDERATION`        | `true`                   | Relay forwards to other mediators; resolve their `did:web` over HTTPS |
@@ -43,6 +44,7 @@ curl localhost:8080/health
 | `ALMENA_FCM_SERVICE_ACCOUNT` | —                      | Firebase service account key file (JSON)                        |
 | `ALMENA_APNS_KEY_PATH`, `_KEY_ID`, `_TEAM_ID`, `_TOPIC` | — | APNs `.p8` key, its id, Apple team id, app bundle id (all four or none) |
 | `ALMENA_APNS_SANDBOX`      | `false`                  | Use the APNs sandbox (development builds of the app)            |
+| `ALMENA_METRICS_ADDR`      | —                        | Prometheus metrics at `http://<addr>/metrics` (e.g. `127.0.0.1:9090`); unset: off. Keep it off the public proxy |
 | `ALMENA_LOG_FORMAT`        | `pretty`                 | `pretty` or `json`                                             |
 | `RUST_LOG`                 | `info`                   | Log filter (`tracing` syntax)                                  |
 
@@ -71,4 +73,4 @@ Common commands are in the [Taskfile](Taskfile.yml) (needs [Task](https://taskfi
 task --list
 ```
 
-`task init` creates `.env` from `.env.example`, `task dev` runs the mediator locally (with Redis in Docker) and `task dev:memory` without Docker, `task smoke` checks a running mediator end to end, `task check` runs lint and tests, `task up` / `task down` start and stop it in Docker.
+`task init` creates `.env` from `.env.example`, `task dev` runs the mediator locally (with Redis in Docker) and `task dev:memory` without Docker, `task smoke` checks a running mediator end to end, `task check` runs lint and tests, `task up` / `task down` start and stop it in Docker. `task rotate-keys` replaces the Docker mediator's keys and restarts it.

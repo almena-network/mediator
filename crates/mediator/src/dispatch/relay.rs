@@ -17,6 +17,7 @@ use sha2::{Digest, Sha256};
 
 use super::{Mediator, ReceiveError};
 use crate::identity::DIDCOMM_PATH;
+use crate::metrics::{Forward, METRICS, Retry};
 use crate::store::{PendingRelay, Store};
 use crate::transport::Transport;
 
@@ -69,7 +70,7 @@ pub async fn relay(
     Ok(())
 }
 
-fn own_endpoints(mediator: &Mediator) -> Vec<String> {
+pub(super) fn own_endpoints(mediator: &Mediator) -> Vec<String> {
     mediator
         .identity()
         .document
@@ -81,9 +82,15 @@ fn own_endpoints(mediator: &Mediator) -> Vec<String> {
 }
 
 /// First attempt now; on failure, stored for [`retry_due`].
-async fn deliver(store: &dyn Store, transport: &dyn Transport, uri: String, message: String) {
+pub(super) async fn deliver(
+    store: &dyn Store,
+    transport: &dyn Transport,
+    uri: String,
+    message: String,
+) {
     let Err(err) = transport.post_didcomm(&uri, &message).await else {
         tracing::debug!(%uri, "forward relayed");
+        METRICS.forward(Forward::Relayed, 1);
         return;
     };
     tracing::info!(%uri, error = %format!("{err:#}"), "relay failed, will retry");
@@ -97,10 +104,14 @@ async fn deliver(store: &dyn Store, transport: &dyn Transport, uri: String, mess
         .schedule_relay(&relay, now() + BACKOFF[0], MAX_PENDING)
         .await
     {
-        Ok(true) => {}
-        Ok(false) => tracing::warn!(uri = %relay.uri, "too many relays waiting, dropped"),
+        Ok(true) => METRICS.forward(Forward::RelayScheduled, 1),
+        Ok(false) => {
+            tracing::warn!(uri = %relay.uri, "too many relays waiting, dropped");
+            METRICS.forward(Forward::RelayDropped, 1);
+        }
         Err(err) => {
             tracing::warn!(uri = %relay.uri, error = %format!("{err:#}"), "could not store relay, dropped");
+            METRICS.forward(Forward::RelayDropped, 1);
         }
     }
 }
@@ -126,12 +137,14 @@ pub async fn retry_due(
         match transport.post_didcomm(&relay.uri, &relay.message).await {
             Ok(()) => {
                 tracing::debug!(uri = %relay.uri, attempt, "forward relayed");
+                METRICS.relay_retry(Retry::Delivered);
                 store.finish_relay(&relay.id).await?;
             }
             Err(err) => {
                 let next = relay.retries as usize + 1;
                 if let Some(wait) = BACKOFF.get(next) {
                     tracing::info!(uri = %relay.uri, attempt, error = %format!("{err:#}"), "relay failed");
+                    METRICS.relay_retry(Retry::Rescheduled);
                     let relay = PendingRelay {
                         retries: relay.retries + 1,
                         ..relay
@@ -141,6 +154,7 @@ pub async fn retry_due(
                         .await?;
                 } else {
                     tracing::warn!(uri = %relay.uri, attempt, error = %format!("{err:#}"), "relay abandoned after retries");
+                    METRICS.relay_retry(Retry::Abandoned);
                     store.finish_relay(&relay.id).await?;
                 }
             }

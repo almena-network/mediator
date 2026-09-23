@@ -8,6 +8,7 @@ use serde_json::{Value, json};
 
 use super::protocols::{self, Problem};
 use super::{Handled, Mediator, ReceiveError};
+use crate::metrics::{Forward, METRICS};
 use crate::store::{AddRecipient, Queued, RemoveRecipient};
 
 /// Handles a Coordinate Mediation message from `requester` (an authenticated DID).
@@ -21,6 +22,7 @@ pub async fn handle(
         protocols::MEDIATE_REQUEST => {
             // Open with limits (docs/didcomm.md §9): every request is granted.
             store.grant_mediation(requester, now()).await?;
+            METRICS.mediation_granted();
             tracing::debug!(mediation = %requester, "mediation granted");
             let grant = Message::new(
                 protocols::MEDIATE_GRANT,
@@ -210,30 +212,43 @@ pub async fn forward(mediator: &Mediator, message: &Message) -> Result<(), Recei
         return super::relay::relay(mediator, next, payloads).await;
     };
     for payload in payloads {
-        let received = now();
-        let id = mediator
-            .store()
-            .enqueue(
-                &mediation,
-                recipient,
-                &payload,
-                received,
-                mediator.limits().queue,
-            )
-            .await?
-            .ok_or(ReceiveError::QueueFull)?;
-        mediator.live().notify(
-            &mediation,
-            &Queued {
-                id,
-                recipient: recipient.to_owned(),
-                received,
-                message: payload,
-            },
-        );
+        queue(mediator, &mediation, recipient, payload).await?;
     }
     tracing::debug!(%recipient, count = attachments.len(), "forward queued");
+    METRICS.forward(Forward::Queued, attachments.len() as u64);
     mediator.wake(&mediation);
+    Ok(())
+}
+
+/// Queues one encrypted message for `recipient` of `mediation` and pushes
+/// it to the mediation's live sessions. Waking its devices is the caller's.
+pub async fn queue(
+    mediator: &Mediator,
+    mediation: &str,
+    recipient: &str,
+    payload: String,
+) -> Result<(), ReceiveError> {
+    let received = now();
+    let id = mediator
+        .store()
+        .enqueue(
+            mediation,
+            recipient,
+            &payload,
+            received,
+            mediator.limits().queue,
+        )
+        .await?
+        .ok_or(ReceiveError::QueueFull)?;
+    mediator.live().notify(
+        mediation,
+        &Queued {
+            id,
+            recipient: recipient.to_owned(),
+            received,
+            message: payload,
+        },
+    );
     Ok(())
 }
 

@@ -17,11 +17,38 @@ use almena_didcomm::{Attachment, FORWARD, Message, PackOptions, unpack};
 use tokio::sync::mpsc;
 
 use crate::identity::Identity;
+use crate::metrics::{self, METRICS, MessageOutcome, Transport as Via};
 use crate::push::{self, Pusher};
 use crate::store::{QueueLimits, Queued, Store};
 use crate::transport::{Transport, WebResolver};
 use live::{LiveHub, Session};
 use protocols::Problem;
+
+/// How often idle mediations are looked for, and how many go per batch.
+const CLEANUP_EVERY: std::time::Duration = std::time::Duration::from_secs(3600);
+const CLEANUP_BATCH: usize = 100;
+
+/// Removes every mediation idle for more than `ttl_secs` at `now`.
+pub(crate) async fn remove_idle(
+    store: &dyn Store,
+    ttl_secs: u64,
+    now: u64,
+) -> anyhow::Result<usize> {
+    let cutoff = now.saturating_sub(ttl_secs);
+    let mut total = 0;
+    loop {
+        let removed = store.remove_idle_mediations(cutoff, CLEANUP_BATCH).await?;
+        total += removed.len();
+        if removed.len() < CLEANUP_BATCH {
+            break;
+        }
+    }
+    if total > 0 {
+        tracing::info!(removed = total, "idle mediations removed");
+        METRICS.mediations_removed(total as u64);
+    }
+    Ok(total)
+}
 
 /// Limits the mediator enforces (docs/didcomm.md §9).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,6 +61,9 @@ pub struct Limits {
     /// Registering a recipient DID other than the mediation's own needs a
     /// possession proof signed by that DID (docs/didcomm.md §4).
     pub recipient_proof: bool,
+    /// A mediation whose wallet sends nothing for this long is removed with
+    /// all it owns; 0 keeps mediations forever.
+    pub mediation_ttl_secs: u64,
 }
 
 /// What the HTTP layer should answer after a message was accepted.
@@ -143,6 +173,25 @@ impl Mediator {
         &self.live
     }
 
+    /// Starts removing idle mediations in the background, once an hour
+    /// (unless `mediation_ttl_secs` is 0).
+    pub fn start_cleanup(&self) {
+        let ttl = self.limits.mediation_ttl_secs;
+        if ttl == 0 {
+            return;
+        }
+        let store = Arc::clone(&self.store);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(CLEANUP_EVERY);
+            loop {
+                tick.tick().await;
+                if let Err(err) = remove_idle(store.as_ref(), ttl, now()).await {
+                    tracing::warn!(error = %format!("{err:#}"), "mediation cleanup failed");
+                }
+            }
+        });
+    }
+
     /// Starts retrying failed relays in the background (federation only).
     pub fn start_relay_retries(&self) {
         if let Some(transport) = &self.transport {
@@ -193,11 +242,13 @@ impl Mediator {
     /// connection task reads live pushes from the receiver and passes each to
     /// [`Mediator::live_delivery`].
     pub fn open_session(&self) -> (Session, mpsc::Receiver<Queued>) {
+        METRICS.live_session_opened();
         self.live.open()
     }
 
     /// Ends a session: no more live pushes for it.
     pub fn close_session(&self, session: &mut Session) {
+        METRICS.live_session_closed();
         self.live.disable(session);
     }
 
@@ -207,12 +258,42 @@ impl Mediator {
         let mediation = session.live_mediation()?;
         let delivery = Message::new(protocols::DELIVERY, serde_json::json!({}))
             .attachment(Attachment::base64(queued.message.as_bytes()).with_id(queued.id));
-        self.pack_reply(delivery, mediation).await
+        self.pack_reply(delivery, mediation, false)
+            .await
+            .map(|packed| packed.message)
     }
 
     /// Handles one envelope. `session` is the live-capable connection it
     /// came on (a WebSocket), or `None` for HTTP.
     pub async fn receive(
+        &self,
+        packed: &str,
+        session: Option<&mut Session>,
+    ) -> Result<Outcome, ReceiveError> {
+        let transport = if session.is_some() {
+            Via::WebSocket
+        } else {
+            Via::Http
+        };
+        let result = self.handle(packed, session).await;
+        METRICS.message(
+            transport,
+            match &result {
+                Ok(Outcome::Accepted) => MessageOutcome::Accepted,
+                Ok(Outcome::Reply(_)) => MessageOutcome::Reply,
+                Err(_) => MessageOutcome::Rejected,
+            },
+        );
+        if let Err(
+            ReceiveError::BadForward(_) | ReceiveError::UnknownRecipient | ReceiveError::QueueFull,
+        ) = &result
+        {
+            METRICS.forward(metrics::Forward::Refused, 1);
+        }
+        result
+    }
+
+    async fn handle(
         &self,
         packed: &str,
         mut session: Option<&mut Session>,
@@ -265,6 +346,10 @@ impl Mediator {
                     || t.starts_with(protocols::PUSH_FCM)
                     || t.starts_with(protocols::PUSH_APNS) =>
                 {
+                    // The wallet is alive: its mediation is not idle.
+                    if let Some(requester) = requester {
+                        self.store.touch_mediation(requester, now()).await?;
+                    }
                     match requester {
                         None => Handled::Problem(Problem::Unauthenticated),
                         Some(requester) if t.starts_with(protocols::PICKUP) => {
@@ -286,14 +371,23 @@ impl Mediator {
             Handled::Problem(problem) => problem.report(&message),
             Handled::Nothing => return Ok(Outcome::Accepted),
         };
-        Ok(self.route_back(&message, reply, session.is_some()).await)
+        Ok(self
+            .route_back(&message, reply, session.is_some(), meta.authenticated)
+            .await)
     }
 
-    /// Packs `reply` for the sender of `request` if it can travel back on the
-    /// same connection: the request must say who sent it (`from`), and ask
-    /// for `return_route: "all"` unless the connection is a WebSocket, where
-    /// it is implied. Otherwise the reply is dropped (docs/didcomm.md §5).
-    async fn route_back(&self, request: &Message, reply: Message, websocket: bool) -> Outcome {
+    /// Packs `reply` for the sender of `request` to travel back on the same
+    /// connection when the request asks for it (`return_route`, implied on a
+    /// WebSocket). Otherwise an authenticated sender gets it through
+    /// [`Mediator::send_reply`]; an anonymous one gets nothing
+    /// (docs/didcomm.md §5).
+    async fn route_back(
+        &self,
+        request: &Message,
+        reply: Message,
+        websocket: bool,
+        authenticated: bool,
+    ) -> Outcome {
         let Some(sender) = request.from.as_deref() else {
             tracing::debug!(id = %request.id, "anonymous sender, reply dropped");
             return Outcome::Accepted;
@@ -309,24 +403,82 @@ impl Mediator {
             Some(_) => false,
             None => websocket,
         };
-        if !route_back {
-            tracing::debug!(id = %request.id, "no return_route, reply dropped");
-            return Outcome::Accepted;
+        if route_back {
+            return self
+                .pack_reply(reply, sender, false)
+                .await
+                .map_or(Outcome::Accepted, |packed| Outcome::Reply(packed.message));
         }
-        self.pack_reply(reply, sender)
-            .await
-            .map_or(Outcome::Accepted, Outcome::Reply)
+        // Only to a sender the authcrypt proved: an unauthenticated `from`
+        // could name anyone, and we would be sending them our replies.
+        if authenticated {
+            self.send_reply(reply, sender).await;
+        } else {
+            tracing::debug!(id = %request.id, "unauthenticated sender, reply dropped");
+        }
+        Outcome::Accepted
+    }
+
+    /// Delivers a reply that cannot go back on the connection, as the spec
+    /// asks: into the sender's queue when it is mediated here, else to its
+    /// `DIDCommMessaging` service (through its mediators) in the background,
+    /// with the relay retries. Without a service the reply is dropped.
+    async fn send_reply(&self, reply: Message, sender: &str) {
+        let sender = almena_didcomm::did::did_of(sender);
+        match self.store.mediation_of(sender).await {
+            Ok(Some(mediation)) => {
+                let Some(packed) = self.pack_reply(reply, sender, false).await else {
+                    return;
+                };
+                match mediation::queue(self, &mediation, sender, packed.message).await {
+                    Ok(()) => {
+                        tracing::debug!(%sender, "reply queued for pickup");
+                        self.wake(&mediation);
+                    }
+                    Err(err) => tracing::info!(%sender, error = %err, "reply dropped"),
+                }
+            }
+            Ok(None) => {
+                let Some(transport) = self.transport.clone() else {
+                    tracing::debug!(%sender, "no federation, reply dropped");
+                    return;
+                };
+                let Some(packed) = self.pack_reply(reply, sender, true).await else {
+                    return;
+                };
+                let Some(uri) = packed.service_uri else {
+                    tracing::debug!(%sender, "sender has no DIDComm service, reply dropped");
+                    return;
+                };
+                if relay::own_endpoints(self).contains(&uri) {
+                    tracing::debug!(%sender, "sender routes through us unregistered, reply dropped");
+                    return;
+                }
+                let store = Arc::clone(&self.store);
+                tokio::spawn(async move {
+                    relay::deliver(store.as_ref(), transport.as_ref(), uri, packed.message).await;
+                });
+            }
+            Err(err) => {
+                tracing::warn!(%sender, error = %format!("{err:#}"), "reply dropped");
+            }
+        }
     }
 
     /// Authcrypts `reply` from the mediator to `recipient`, never wrapped for the
     /// recipient's mediators: it goes back on the connection it came from.
-    async fn pack_reply(&self, reply: Message, recipient: &str) -> Option<String> {
+    async fn pack_reply(
+        &self,
+        reply: Message,
+        recipient: &str,
+        forward: bool,
+    ) -> Option<almena_didcomm::PackedMessage> {
         let sender = recipient;
         let reply = reply.from(&self.identity.did).to([sender]);
-        // The reply goes back on this connection: never wrap it for the
-        // sender's mediators.
+        // Back on the connection, or into the sender's queue here: never
+        // wrapped. To the sender's service: wrapped for its mediators.
         let options = PackOptions {
-            forward: false,
+            forward,
             ..PackOptions::default()
         };
         match reply
@@ -340,7 +492,7 @@ impl Mediator {
             )
             .await
         {
-            Ok(packed) => Some(packed.message),
+            Ok(packed) => Some(packed),
             Err(err) => {
                 tracing::warn!(%sender, error = %err, "could not pack reply");
                 None
@@ -794,6 +946,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn idle_mediations_are_removed_and_active_ones_kept() {
+        let mediator = mediator();
+        let (idle, active) = (Wallet::new(Curve::X25519), Wallet::new(Curve::X25519));
+        // Both granted long ago...
+        for wallet in [&idle, &active] {
+            mediator
+                .store()
+                .grant_mediation(&wallet.did, 1_000)
+                .await
+                .unwrap();
+        }
+        // ...but one wallet still picks up.
+        active
+            .request(&mediator, protocols::STATUS_REQUEST, json!({}))
+            .await;
+
+        let removed = remove_idle(mediator.store(), 3600, now()).await.unwrap();
+        assert_eq!(removed, 1);
+        assert!(!mediator.store().has_mediation(&idle.did).await.unwrap());
+        assert!(mediator.store().has_mediation(&active.did).await.unwrap());
+        let report = idle
+            .request(&mediator, protocols::STATUS_REQUEST, json!({}))
+            .await;
+        assert_eq!(report.body["code"], "e.m.req.no-mediation");
+    }
+
+    /// Bob's ping without `return_route`, authcrypted unless `anonymous`.
+    async fn ping_without_return_route(mediator: &Mediator, bob: &Wallet, anonymous: bool) {
+        let ping = Message::new(protocols::PING, json!({})).from(&bob.did);
+        let packed = bob.send(mediator.identity(), ping, anonymous).await;
+        assert_eq!(
+            mediator.receive(&packed, None).await.unwrap(),
+            Outcome::Accepted
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reply_without_return_route_waits_in_the_senders_queue() {
+        let mediator = mediator();
+        let bob = Wallet::mediated_by(&mediator.identity().did);
+        mediate(&mediator, &bob).await;
+        ping_without_return_route(&mediator, &bob, false).await;
+
+        let delivery = bob
+            .request(&mediator, protocols::DELIVERY_REQUEST, json!({"limit": 10}))
+            .await;
+        let attachments = delivery.attachments.unwrap();
+        assert_eq!(attachments.len(), 1);
+        let queued =
+            String::from_utf8(b64::decode(attachments[0].data.base64.as_deref().unwrap()).unwrap())
+                .unwrap();
+        let pong = bob.open(mediator.identity(), &queued).await;
+        assert_eq!(pong.type_, protocols::PING_RESPONSE);
+    }
+
+    #[tokio::test]
+    async fn an_unauthenticated_sender_gets_no_reply_anywhere() {
+        let mediator = mediator();
+        let bob = Wallet::mediated_by(&mediator.identity().did);
+        mediate(&mediator, &bob).await;
+        // Anyone can write Bob's DID as `from` in an anoncrypted message.
+        ping_without_return_route(&mediator, &bob, true).await;
+        let status = bob
+            .request(&mediator, protocols::STATUS_REQUEST, json!({}))
+            .await;
+        assert_eq!(status.body["message_count"], 0);
+    }
+
+    #[tokio::test]
     async fn recipient_limit_is_enforced() {
         let mediator = mediator();
         let bob = Wallet::new(Curve::X25519);
@@ -1031,6 +1252,28 @@ mod tests {
             .await
             .unwrap()
             .message
+    }
+
+    #[tokio::test]
+    async fn a_reply_to_a_sender_mediated_elsewhere_goes_through_its_mediator() {
+        let net = Arc::new(InProcess::default());
+        let (a, b, bob) =
+            federation(net.clone() as Arc<dyn crate::transport::Transport>, &net).await;
+        // Bob pings A, without return_route: A's answer travels to B.
+        ping_without_return_route(&a, &bob, false).await;
+        for _ in 0..100 {
+            let queued = b
+                .store()
+                .summary(&bob.did, None, now(), 3600)
+                .await
+                .unwrap()
+                .count;
+            if queued == 1 {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("A's reply never reached Bob's queue at B");
     }
 
     /// A transport whose first `failures` POSTs fail.

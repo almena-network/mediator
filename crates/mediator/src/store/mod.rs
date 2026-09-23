@@ -92,8 +92,14 @@ pub trait Store: Send + Sync {
     /// `"redis"` or `"memory"`, for logs.
     fn kind(&self) -> &'static str;
 
-    /// Records a granted mediation (idempotent).
+    /// Records a granted mediation (idempotent) and counts it as active now.
     async fn grant_mediation(&self, mediation: &str, now: u64) -> Result<()>;
+    /// The mediation's wallet did something at `now`; nothing if there is no
+    /// such mediation.
+    async fn touch_mediation(&self, mediation: &str, now: u64) -> Result<()>;
+    /// Removes up to `limit` mediations last active at or before `cutoff`,
+    /// with everything they own: recipient DIDs, queue, devices. Returns them.
+    async fn remove_idle_mediations(&self, cutoff: u64, limit: usize) -> Result<Vec<String>>;
     async fn has_mediation(&self, mediation: &str) -> Result<bool>;
 
     /// Registers `recipient` for `mediation`, first come first served.
@@ -405,6 +411,52 @@ pub(crate) mod contract {
                 .await
                 .unwrap()
                 .is_some()
+        );
+
+        // Idle mediations go with everything they own; active ones stay.
+        let (idle, active) = (
+            format!("did:peer:idle-{tag}"),
+            format!("did:peer:active-{tag}"),
+        );
+        let idle_r = format!("did:peer:idle-r-{tag}");
+        store.grant_mediation(&idle, 1_000).await.unwrap();
+        store.grant_mediation(&active, 1_000).await.unwrap();
+        store.touch_mediation(&active, 5_000).await.unwrap();
+        store
+            .touch_mediation(&format!("did:peer:none-{tag}"), 5_000)
+            .await
+            .unwrap();
+        store.add_recipient(&idle, &idle_r, 5).await.unwrap();
+        store
+            .enqueue(&idle, &idle_r, "left behind", now, LIMITS)
+            .await
+            .unwrap();
+        store
+            .set_device(
+                &idle,
+                Service::Fcm,
+                Some(&Device {
+                    token: "t".into(),
+                    platform: Some("android".into()),
+                }),
+            )
+            .await
+            .unwrap();
+        let removed = store.remove_idle_mediations(2_000, 1000).await.unwrap();
+        assert!(removed.contains(&idle) && !removed.contains(&active));
+        assert!(!store.has_mediation(&idle).await.unwrap());
+        assert!(store.has_mediation(&active).await.unwrap());
+        assert_eq!(store.mediation_of(&idle_r).await.unwrap(), None);
+        assert!(store.recipients(&idle).await.unwrap().is_empty());
+        assert!(store.devices(&idle).await.unwrap().is_empty());
+        assert_eq!(
+            store.summary(&idle, None, now, 3600).await.unwrap().count,
+            0
+        );
+        // A DID freed this way can be registered again.
+        assert_eq!(
+            store.add_recipient(&active, &idle_r, 5).await.unwrap(),
+            AddRecipient::Added
         );
 
         // Relays: due in order, leased while being tried, capped.

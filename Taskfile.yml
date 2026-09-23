@@ -85,9 +85,10 @@ tasks:
       - task: test
 
   clean:
-    desc: Remove build output and the local Docker image
+    desc: Remove build output, the Veramo client's installed packages and copied certificate, and the local Docker image
     cmds:
       - cargo clean
+      - rm -rf interop/veramo/node_modules interop/veramo/caddy-root.crt
       - docker image rm -f {{.IMAGE}}
 
   docker:build:
@@ -109,6 +110,13 @@ tasks:
     desc: Stop and remove the Docker containers and their volumes (deletes the Redis data)
     cmds:
       - docker compose down --volumes --remove-orphans
+
+  rotate-keys:
+    desc: Replace the Docker mediator's keys with new ones and restart it (messages in flight to the old keys are refused)
+    prompt: Rotate the mediator's keys? Whatever was encrypted to the old ones will be refused.
+    cmds:
+      - docker compose exec mediator almena-mediator rotate-keys
+      - docker compose restart mediator
 
   logs:
     desc: Follow the mediator's container logs

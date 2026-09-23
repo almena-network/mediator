@@ -149,7 +149,7 @@ Replies follow §5: they need the request's `from` and `return_route: "all"` (or
 - **recipient-update**: `add` / `remove` per DID, answered with `success`, `no_change` or `client_error`. A recipient DID belongs to the first mediation that registers it (`client_error` for others). DID URLs, non-DIDs and unknown actions are `client_error`; so is going over `ALMENA_MAX_RECIPIENT_DIDS`. Removing a DID keeps its queued messages until they are picked up or expire.
 - **Recipient proof** (Almena extension, `ALMENA_RECIPIENT_PROOF=required`, the default). The protocol has no proof that a wallet controls the DIDs it registers, so anyone could claim someone else's DID first and receive (though not read) its messages. **Decided:** an `add` for a DID other than the mediation's own carries `"proof"`: a compact JWT signed with an `authentication` key of that DID, with claims `iss` = the DID, `aud` = the mediator's DID, `sub` = the mediation's DID and `iat` no older than 5 minutes (up to 1 minute ahead). A missing or wrong proof is `client_error`. The mediation's own DID needs none: its authcrypt already proves it. `almena_didcomm::PossessionProof` makes and checks these proofs; `ALMENA_RECIPIENT_PROOF=off` falls back to the plain protocol.
 - **recipient-query**: all DIDs, sorted; with `paginate` a page plus `pagination {count, offset, remaining}`.
-- **forward**: `next` (a DID or one of its key ids) must be a registered recipient. Each attachment (`json` or `base64`; `links` are refused) must be an encrypted DIDComm message and is queued as is. `please_ack` is never honoured. Forward senders are anonymous, so failures are HTTP statuses, not problem reports: `400` malformed, `404` unknown recipient, `507` queue full, `503` storage down.
+- **forward**: `next` (a DID or one of its key ids) must be a registered recipient. Each attachment (`json` or `base64`) must be an encrypted DIDComm message and is queued as is. **Decided — `links` attachments are refused** (`400`): fetching URLs a stranger hands us would open the mediator to SSRF and make it download things on anyone's behalf, and no client we tested uses them. `please_ack` is never honoured. Forward senders are anonymous, so failures are HTTP statuses, not problem reports: `400` malformed, `404` unknown recipient, `507` queue full, `503` storage down.
 - **Pickup** (`status-request`, `delivery-request`, `messages-received`, `live-delivery-change`) needs a granted mediation (`e.m.req.no-mediation`). `recipient_did`, if given, must be one of the mediation's (`e.m.msg.unknown-recipient`). A `delivery` carries up to `min(limit, 100)` messages, oldest first, as `base64` attachments whose `id` is the queue id to acknowledge. Messages stay queued until `messages-received`. `status` reports `message_count`, `total_bytes`, oldest/newest times, `longest_waited_seconds` and `live_delivery: false`. `live_delivery: true` gets `e.m.live-mode-not-supported` over HTTP (live mode comes with WebSockets, phase 4).
 - Replies to the mediator's own messages are never wrapped for the wallet's mediators: they go back on the connection.
 
@@ -181,7 +181,7 @@ Replies follow §5: they need the request's `from` and `return_route: "all"` (or
 | `413` | Larger than `ALMENA_MAX_MESSAGE_BYTES`. |
 | `415` | Any other `Content-Type`. |
 
-DIDComm v2.0 says POST is one-way and replies do not come back in the HTTP response. **Decided:** the `return_route` header extension is the one exception, because wallets have no endpoint of their own; without it the mediator sends nothing back. `"all"` and `"thread"` are treated alike (every reply is in the request's thread); `"none"` turns replies off, even on a WebSocket. Replies to senders that do not ask for `return_route` are dropped for now: delivering them to the sender's own endpoint is outbound delivery, which comes with federation (phase 4).
+DIDComm v2.0 says POST is one-way and replies do not come back in the HTTP response. **Decided:** the `return_route` header extension is the one exception, because wallets have no endpoint of their own; without it the mediator sends nothing back. `"all"` and `"thread"` are treated alike (every reply is in the request's thread); `"none"` turns replies off, even on a WebSocket. **Decided:** a reply that cannot go back on the connection (no `return_route`, or `"none"`) is delivered as the spec asks, but only to a sender authenticated by authcrypt — an unauthenticated `from` could name anyone. If the sender is mediated here it goes into its queue (live push or wake-up as usual); otherwise it is wrapped for the sender's mediators and sent to its `DIDCommMessaging` service in the background, with the relay retries of §7. A sender without a service, or one that names this mediator without being registered, gets nothing.
 
 Wallets also use it to poll with Message Pickup (`status-request`, `delivery-request`) when they have no WebSocket open, e.g. right after a push wakes them.
 
@@ -193,7 +193,7 @@ The wallet opens it when it comes to the foreground and sends Pickup `live-deliv
 
 **Decided — live messages stay queued until acknowledged.** Message Pickup 3.0 says live messages are delivered "rather than being pushed to the queue". We queue them *and* push them, and they leave the queue only with `messages-received`, so a connection that drops mid-delivery loses nothing (the usual case on mobile). A wallet that acknowledges what it gets live never sees it twice.
 
-A mediation counts as *online* while a WebSocket session has live mode on for it. Sessions are tracked in process (`dispatch/live.rs`); running several mediator instances behind one Redis would need the `live:{M}` pub/sub channel (§8) to fan pushes out — not done yet.
+A mediation counts as *online* while a WebSocket session has live mode on for it. Sessions are tracked in process (`dispatch/live.rs`). **Decided — one instance for now.** Behind a load balancer with several instances, a message queued by one instance would not be pushed live to a session on another (it would still be picked up), and that instance would send a needless push. When scaling out is needed: one Redis pub/sub channel that every instance listens to and filters, plus a shared presence key with a TTL for the push check.
 
 ### Push
 
@@ -215,7 +215,7 @@ The mediator's DID document advertises one `DIDCommMessaging` service with the H
 
 TLS is terminated in front of the mediator (reverse proxy) in production; the mediator itself speaks plain HTTP.
 
-**Decided — the first mediator is `https://mediator.almena.network`** (`did:web:mediator.almena.network`).
+**Decided — the first mediator is `https://mediator.almena.network`** (`did:web:mediator.almena.network`). Its deployment is deferred until the wallet needs a public mediator; development runs at `https://mediator.dev.almena.network` (Caddy with a local CA, `compose.yml`).
 
 ## 6. Mediator identity and keys
 
@@ -230,6 +230,8 @@ TLS is terminated in front of the mediator (reverse proxy) in production; the me
 | `<did>#key-p384` | P-384 | `keyAgreement` |
 
 The document has one `DIDCommMessaging` service, `<did>#didcomm`, with two endpoints, HTTPS first: `{"uri": "<origin>/didcomm", "accept": ["didcomm/v2"]}` and `{"uri": "wss://<host>/ws", "accept": ["didcomm/v2"]}` (`ws://` for an `http` origin).
+
+**Decided — key rotation replaces the keys at once.** `almena-mediator rotate-keys` (`task rotate-keys` under Docker, which also restarts the container) writes three new keys to `ALMENA_KEYS_PATH`; the DID and the key ids stay, and the mediator uses the new keys from its next start. There is no overlap: whatever was encrypted to the old keys and is still in flight gets `400` and is sent again once the sender resolves the DID anew (other mediators cache it for 5 minutes). Rotation is mainly for a compromised key, which should stop working at once. Messages already queued are not affected: they are encrypted to the wallets, not to the mediator.
 
 Wallets whose key agreement is on another curve (e.g. P-256, which the spec deprecates) cannot get authcrypted replies from the mediator.
 
@@ -246,7 +248,7 @@ The mediator resolves its own DID from memory, and `did:key` / `did:peer` locall
 
 **Decided — SSRF guard.** Every outbound URL comes from a DID document, i.e. from strangers. The HTTP client only uses `https`, refuses IP-literal hosts, and resolves names through a resolver that drops private, loopback, link-local, CGNAT and documentation addresses — checked when connecting, so DNS rebinding cannot get around it. `ALMENA_OUTBOUND_ALLOW_INSECURE=true` lifts all of this, for running several mediators on one machine only.
 
-Not done: delivering the mediator's own replies to a sender's endpoint when the sender did not ask for `return_route` — replies still travel only on the connection they answer (§5).
+The mediator's own replies to senders mediated elsewhere use the same path (§5).
 
 ## 8. Storage
 
@@ -264,12 +266,12 @@ The mediator refuses to start without its store (`ALMENA_REDIS_URL`, default `re
 |---|---|---|
 | `mediation:{M}` | string | Grant time |
 | `mediation:{M}:recipients` | set | Recipient DIDs registered by `M` |
+| `mediations:seen` | sorted set | Mediations by when their wallet was last active, for `ALMENA_MEDIATION_TTL` |
 | `recipient:{R}` | string | The mediation that registered `R` |
 | `mediation:{M}:queue` | stream | One entry per queued message: recipient and size |
 | `mediation:{M}:msg:{id}` | string with TTL | The message itself |
 | `mediation:{M}:bytes` | counter with TTL | Bytes queued, kept in step by the enqueue, expiry and removal scripts |
 | `rate:{key}:{window}` | counter with TTL | Rate-limit hits |
-| `live:{M}` | pub/sub channel | Wakes the WebSocket session of `M` (phase 4) |
 | `push:{M}` | hash | Devices: service (`fcm`, `apns`) → `{token, platform}` as JSON (phase 5) |
 | `push-sent:{M}` | string with TTL | Time of the last push, until the wallet picks up (phase 5) |
 | `relay:due` | sorted set | Relays to other mediators waiting for a retry, by when they are due (or leased until) |
@@ -290,6 +292,7 @@ Settings (all `ALMENA_*` environment variables):
 | `ALMENA_QUEUE_MAX_MESSAGES` | 10000 | Per **mediation**; further forwards get `507` ✅ |
 | `ALMENA_QUEUE_MAX_BYTES` | 104857600 (100 MiB) | Bytes queued per mediation; a forward that would go over gets `507`. Must be at least `ALMENA_MAX_MESSAGE_BYTES` ✅ |
 | `ALMENA_MAX_RECIPIENT_DIDS` | 100 | Per mediation; further adds get `client_error` ✅ |
+| `ALMENA_MEDIATION_TTL` | 7776000 (90 days) | A mediation whose wallet sends no authenticated Coordinate Mediation, Pickup or push message for this long is removed, with its recipient DIDs (free to register again), queue and devices; checked hourly. `0` = never ✅ |
 | `ALMENA_RECIPIENT_PROOF` | `required` | `required`: registering a DID other than the mediation's own needs a possession proof (§4); `off`: not ✅ |
 | `ALMENA_RATE_LIMIT` | 60 | `POST /didcomm` requests per minute per client IP (fixed window, counted in the store); over it, `429` with `Retry-After`; `0` turns it off ✅ |
 | `ALMENA_CLIENT_IP_HEADER` | — | Behind a reverse proxy: the header carrying the client IP (e.g. `x-forwarded-for`); its **last** value is used, the one our proxy added. Unset: the TCP peer address ✅ |
@@ -298,6 +301,21 @@ Settings (all `ALMENA_*` environment variables):
 | `ALMENA_FCM_SERVICE_ACCOUNT` | — | Service account key file (JSON) of the wallet app's Firebase project ✅ |
 | `ALMENA_APNS_KEY_PATH`, `ALMENA_APNS_KEY_ID`, `ALMENA_APNS_TEAM_ID`, `ALMENA_APNS_TOPIC` | — | APNs `.p8` key file, its key id, the Apple team id and the app's bundle id; all four or none ✅ |
 | `ALMENA_APNS_SANDBOX` | `false` | Push to the APNs sandbox (development builds of the app) ✅ |
+
+### Metrics
+
+**Decided:** Prometheus text format on a listener of its own, `ALMENA_METRICS_ADDR` (off by default), so it never goes out through the public proxy; hand-written counters, no extra dependencies. Everything is aggregate — no DIDs, nothing per mediation:
+
+| Metric | Labels |
+|---|---|
+| `almena_mediator_info` | `version` |
+| `almena_didcomm_messages_total` | `transport` (`http`, `websocket`), `outcome` (`accepted`, `reply`, `rejected`) |
+| `almena_rate_limited_total` | — |
+| `almena_forwards_total` | `result` (`queued`, `relayed`, `relay_scheduled`, `relay_dropped`, `refused`) |
+| `almena_relay_retries_total` | `result` (`delivered`, `rescheduled`, `abandoned`) |
+| `almena_pushes_total` | `service` (`fcm`, `apns`), `result` (`delivered`, `invalid_token`, `failed`) |
+| `almena_live_sessions` (gauge) | — |
+| `almena_mediations_granted_total`, `almena_mediations_removed_total` | — |
 
 ## 10. Phases
 

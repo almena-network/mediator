@@ -21,6 +21,7 @@ Cargo workspace:
   - `push/`: wake-ups through FCM (`fcm.rs`) and APNs (`apns.rs`), coalescing, the `Pusher` trait.
   - `transport.rs`: outbound HTTPS with the SSRF guard, and the `did:web` resolver. `oob.rs`: the Out-of-Band invitation.
   - `routes` is the axum router: HTTP and WebSocket endpoints, rate limit, HTTP status mapping.
+  - `metrics.rs`: Prometheus counters, served by their own listener (`ALMENA_METRICS_ADDR`), not by the router.
   - `src/main.rs`: logging, start-up, graceful shutdown, `healthcheck` subcommand. `testing.rs` has a test mediator and wallets.
   - `examples/smoke.rs`: end-to-end client against a running mediator (`task smoke`).
 - `Dockerfile`, `compose.yml` (mediator + Redis), `.env.example` — container build and local run. `data/` (local keys) is git-ignored.
@@ -30,5 +31,5 @@ Cargo workspace:
 
 - Everything is written in English.
 - `almena-didcomm` denies `unwrap`/`expect` outside tests (`clippy.toml` allows them in tests) and uses `thiserror`; the mediator binary uses `anyhow`.
-- Every HTTP endpoint is declared with `#[utoipa::path]` and registered through `OpenApiRouter` in `crates/mediator/src/routes.rs`, so it appears in `/openapi.json` and `/docs`. Keep the README endpoint table in sync.
+- Every HTTP endpoint of the public router is declared with `#[utoipa::path]` and registered through `OpenApiRouter` in `crates/mediator/src/routes.rs`, so it appears in `/openapi.json` and `/docs`. Keep the README endpoint table in sync.
 - Tasks live in `Taskfile.yml` (`task --list`). Before finishing a change: `task check` (fmt check, clippy -D warnings, tests).

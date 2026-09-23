@@ -3,6 +3,7 @@
 pub mod config;
 pub mod dispatch;
 pub mod identity;
+pub mod metrics;
 pub mod oob;
 pub mod push;
 pub mod routes;
