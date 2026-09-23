@@ -1,0 +1,7 @@
+target
+Dockerfile
+.dockerignore
+*.md
+compose.yml
+.env
+.env.example

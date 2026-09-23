@@ -1,0 +1,82 @@
+# https://taskfile.dev
+version: "3"
+
+dotenv: [".env"]
+
+vars:
+  IMAGE: almena-node:dev
+
+tasks:
+  default:
+    desc: List available tasks
+    cmds:
+      - task --list
+    silent: true
+
+  dev:
+    desc: Run the node locally with readable debug logs
+    env:
+      ALMENA_LOG_FORMAT: pretty
+      RUST_LOG: '{{.RUST_LOG | default "almena_node=debug,tower_http=debug,info"}}'
+    cmds:
+      - cargo run
+
+  build:
+    desc: Build the release binary (target/release/almena-node)
+    cmds:
+      - cargo build --release --locked
+
+  test:
+    desc: Run the test suite
+    cmds:
+      - cargo test --locked {{.CLI_ARGS}}
+
+  fmt:
+    desc: Format the code
+    cmds:
+      - cargo fmt
+
+  lint:
+    desc: Check formatting and run clippy with warnings as errors
+    cmds:
+      - cargo fmt --check
+      - cargo clippy --all-targets --locked -- -D warnings
+
+  check:
+    desc: Everything that must pass before finishing a change (lint + test)
+    cmds:
+      - task: lint
+      - task: test
+
+  clean:
+    desc: Remove build output and the local Docker image
+    cmds:
+      - cargo clean
+      - docker image rm -f {{.IMAGE}}
+
+  docker:build:
+    desc: Build the Docker image
+    cmds:
+      - docker compose build
+
+  up:
+    desc: Start the node in Docker (detached) and wait until it is healthy
+    cmds:
+      - docker compose up --build --detach --wait
+
+  down:
+    desc: Stop and remove the Docker containers
+    cmds:
+      - docker compose down
+
+  logs:
+    desc: Follow the node's container logs
+    cmds:
+      - docker compose logs --follow node
+
+  health:
+    desc: Query the running node's health endpoint
+    cmds:
+      - curl --fail --silent --show-error http://localhost:{{.ALMENA_NODE_PORT | default "8080"}}/health
+      - echo
+    silent: true

@@ -1,0 +1,19 @@
+name: almena-node
+
+services:
+  node:
+    build:
+      context: .
+    image: almena-node:dev
+    restart: unless-stopped
+    ports:
+      - "${ALMENA_NODE_PORT:-8080}:8080"
+    environment:
+      ALMENA_LOG_FORMAT: ${ALMENA_LOG_FORMAT:-json}
+      RUST_LOG: ${RUST_LOG:-info}
+    healthcheck:
+      test: ["CMD", "almena-node", "healthcheck"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
