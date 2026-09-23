@@ -1,0 +1,207 @@
+//! Coordinate Mediation 3.0 (the mediator side) and Routing 2.0 `forward`.
+
+use almena_didcomm::crypto::jwe::Jwe;
+use almena_didcomm::did::did_of;
+use almena_didcomm::message::now;
+use almena_didcomm::{Message, b64};
+use serde_json::{Value, json};
+
+use super::protocols::{self, Problem};
+use super::{Handled, Mediator, ReceiveError};
+use crate::store::{AddRecipient, Queued, RemoveRecipient};
+
+/// Handles a Coordinate Mediation message from `requester` (an authenticated DID).
+pub async fn handle(
+    mediator: &Mediator,
+    requester: &str,
+    message: &Message,
+) -> anyhow::Result<Handled> {
+    let store = mediator.store();
+    match message.type_.as_str() {
+        protocols::MEDIATE_REQUEST => {
+            // Open with limits (docs/didcomm.md §9): every request is granted.
+            store.grant_mediation(requester, now()).await?;
+            tracing::debug!(mediation = %requester, "mediation granted");
+            let grant = Message::new(
+                protocols::MEDIATE_GRANT,
+                json!({ "routing_did": [mediator.identity().did] }),
+            );
+            Ok(Handled::Reply(grant.reply_to(message)))
+        }
+        protocols::RECIPIENT_UPDATE => {
+            if !store.has_mediation(requester).await? {
+                return Ok(Handled::Problem(Problem::NoMediation));
+            }
+            let Some(updates) = message.body.get("updates").and_then(Value::as_array) else {
+                return Ok(Handled::Problem(Problem::InvalidBody));
+            };
+            let mut updated = Vec::with_capacity(updates.len());
+            for update in updates {
+                let did = update
+                    .get("recipient_did")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let action = update
+                    .get("action")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let result = if !is_did(did) {
+                    "client_error"
+                } else {
+                    match action {
+                        "add" => match store
+                            .add_recipient(requester, did, mediator.limits().max_recipient_dids)
+                            .await?
+                        {
+                            AddRecipient::Added => "success",
+                            AddRecipient::AlreadyYours => "no_change",
+                            AddRecipient::TakenByOther | AddRecipient::LimitReached => {
+                                "client_error"
+                            }
+                        },
+                        "remove" => match store.remove_recipient(requester, did).await? {
+                            RemoveRecipient::Removed => "success",
+                            RemoveRecipient::NotRegistered => "no_change",
+                            RemoveRecipient::NotYours => "client_error",
+                        },
+                        _ => "client_error",
+                    }
+                };
+                updated.push(json!({"recipient_did": did, "action": action, "result": result}));
+            }
+            let response = Message::new(
+                protocols::RECIPIENT_UPDATE_RESPONSE,
+                json!({ "updated": updated }),
+            );
+            Ok(Handled::Reply(response.reply_to(message)))
+        }
+        protocols::RECIPIENT_QUERY => {
+            if !store.has_mediation(requester).await? {
+                return Ok(Handled::Problem(Problem::NoMediation));
+            }
+            let all = store.recipients(requester).await?;
+            let body = match message.body.get("paginate") {
+                None => json!({ "dids": dids(&all) }),
+                Some(paginate) => {
+                    let (Some(limit), Some(offset)) = (
+                        paginate.get("limit").and_then(Value::as_u64),
+                        paginate.get("offset").and_then(Value::as_u64),
+                    ) else {
+                        return Ok(Handled::Problem(Problem::InvalidBody));
+                    };
+                    let offset = usize::try_from(offset).unwrap_or(usize::MAX).min(all.len());
+                    let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+                    let page = &all[offset..offset.saturating_add(limit).min(all.len())];
+                    json!({
+                        "dids": dids(page),
+                        "pagination": {
+                            "count": page.len(),
+                            "offset": offset,
+                            "remaining": all.len() - offset - page.len(),
+                        }
+                    })
+                }
+            };
+            Ok(Handled::Reply(
+                Message::new(protocols::RECIPIENT, body).reply_to(message),
+            ))
+        }
+        _ => Ok(Handled::Problem(Problem::UnsupportedType)),
+    }
+}
+
+fn dids(list: &[String]) -> Vec<Value> {
+    list.iter()
+        .map(|did| json!({ "recipient_did": did }))
+        .collect()
+}
+
+/// A DID without fragment, query or path.
+fn is_did(value: &str) -> bool {
+    value.starts_with("did:") && value.len() > 4 && did_of(value) == value
+}
+
+/// Routing 2.0: queues each attached message for `next` when it is a
+/// recipient DID (or one of its key ids) registered with this node, and
+/// relays it to `next`'s own node otherwise (see `relay`). Forward
+/// senders are anonymous by design, so failures are reported at the HTTP
+/// level (see `ReceiveError`), never as DIDComm problem reports.
+pub async fn forward(mediator: &Mediator, message: &Message) -> Result<(), ReceiveError> {
+    let next = message
+        .body
+        .get("next")
+        .and_then(Value::as_str)
+        .ok_or(ReceiveError::BadForward("forward without next"))?;
+    let attachments = message
+        .attachments
+        .as_deref()
+        .filter(|a| !a.is_empty())
+        .ok_or(ReceiveError::BadForward("forward without attachments"))?;
+
+    // Check everything before queueing anything.
+    let mut payloads = Vec::with_capacity(attachments.len());
+    for attachment in attachments {
+        let payload = if let Some(json) = &attachment.data.json {
+            json.to_string()
+        } else if let Some(base64) = &attachment.data.base64 {
+            String::from_utf8(
+                b64::decode(base64)
+                    .map_err(|_| ReceiveError::BadForward("attachment is not base64url"))?,
+            )
+            .map_err(|_| ReceiveError::BadForward("attachment is not UTF-8"))?
+        } else {
+            return Err(ReceiveError::BadForward(
+                "only json and base64 attachments are supported",
+            ));
+        };
+        // Message Pickup delivers only DIDComm encrypted messages.
+        Jwe::parse(&payload).map_err(|_| {
+            ReceiveError::BadForward("attachment is not an encrypted DIDComm message")
+        })?;
+        payloads.push(payload);
+    }
+
+    let recipient = did_of(next);
+    let Some(mediation) = mediator.store().mediation_of(recipient).await? else {
+        // Not ours: pass it on to the node that mediates `next`, if allowed.
+        return super::relay::relay(mediator, next, payloads).await;
+    };
+    for payload in payloads {
+        let received = now();
+        let id = mediator
+            .store()
+            .enqueue(
+                &mediation,
+                recipient,
+                &payload,
+                received,
+                mediator.limits().queue,
+            )
+            .await?
+            .ok_or(ReceiveError::QueueFull)?;
+        mediator.live().notify(
+            &mediation,
+            &Queued {
+                id,
+                recipient: recipient.to_owned(),
+                received,
+                message: payload,
+            },
+        );
+    }
+    tracing::debug!(%recipient, count = attachments.len(), "forward queued");
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dids_only() {
+        assert!(is_did("did:peer:2.abc"));
+        assert!(!is_did("did:peer:2.abc#key-1"));
+        assert!(!is_did("did:"));
+        assert!(!is_did("https://example.com"));
+    }
+}

@@ -9,11 +9,47 @@ services:
     ports:
       - "${ALMENA_NODE_PORT:-8080}:8080"
     environment:
+      ALMENA_PUBLIC_URL: ${ALMENA_PUBLIC_URL:-http://localhost:8080}
+      ALMENA_REDIS_URL: redis://redis:6379
+      ALMENA_MAX_MESSAGE_BYTES: ${ALMENA_MAX_MESSAGE_BYTES:-1048576}
+      ALMENA_QUEUE_TTL: ${ALMENA_QUEUE_TTL:-2592000}
+      ALMENA_QUEUE_MAX_MESSAGES: ${ALMENA_QUEUE_MAX_MESSAGES:-10000}
+      ALMENA_MAX_RECIPIENT_DIDS: ${ALMENA_MAX_RECIPIENT_DIDS:-100}
+      ALMENA_RATE_LIMIT: ${ALMENA_RATE_LIMIT:-60}
+      ALMENA_CLIENT_IP_HEADER: ${ALMENA_CLIENT_IP_HEADER:-}
+      ALMENA_FEDERATION: ${ALMENA_FEDERATION:-true}
+      ALMENA_OUTBOUND_ALLOW_INSECURE: ${ALMENA_OUTBOUND_ALLOW_INSECURE:-false}
       ALMENA_LOG_FORMAT: ${ALMENA_LOG_FORMAT:-json}
       RUST_LOG: ${RUST_LOG:-info}
+    volumes:
+      # The node's private keys (keys.json). Mount a file here to bring your own.
+      - node-data:/data
+    depends_on:
+      redis:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "almena-node", "healthcheck"]
       interval: 10s
       timeout: 3s
       retries: 3
       start_period: 5s
+
+  redis:
+    image: redis:8-alpine
+    restart: unless-stopped
+    # AOF so that queued messages survive restarts (docs/didcomm.md §8).
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+    ports:
+      # Local access for `task dev`; bound to loopback only.
+      - "127.0.0.1:${ALMENA_REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  node-data:
+  redis-data:

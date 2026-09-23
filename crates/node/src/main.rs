@@ -1,4 +1,12 @@
-use almena_node::{Config, config::LogFormat, router};
+use std::sync::Arc;
+
+use std::net::SocketAddr;
+
+use almena_node::identity::Identity;
+use almena_node::mediator::{Limits, Mediator};
+use almena_node::store::{self, QueueLimits};
+use almena_node::transport::{HttpTransport, Transport};
+use almena_node::{AppState, Config, config::LogFormat, router};
 use anyhow::Result;
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
@@ -11,12 +19,58 @@ async fn main() -> Result<()> {
     }
     init_tracing(config.log_format);
 
-    let listener = TcpListener::bind(config.bind).await?;
-    tracing::info!(addr = %listener.local_addr()?, version = env!("CARGO_PKG_VERSION"), "almena node listening");
+    let identity = Identity::load_or_create(&config.keys_path, &config.public_url)?;
+    let store = store::open(&config.redis_url).await?;
+    if store.kind() == "memory" {
+        tracing::warn!("in-memory storage: every mediation and queued message is lost on restart");
+    }
+    let limits = Limits {
+        max_message_bytes: config.max_message_bytes,
+        queue: QueueLimits {
+            ttl_secs: config.queue_ttl_secs,
+            max_messages: config.queue_max_messages,
+        },
+        max_recipient_dids: config.max_recipient_dids,
+    };
+    let transport: Option<Arc<dyn Transport>> = if config.federation {
+        if config.outbound_allow_insecure {
+            tracing::warn!(
+                "outbound requests may use plain HTTP and private addresses (ALMENA_OUTBOUND_ALLOW_INSECURE)"
+            );
+        }
+        Some(Arc::new(HttpTransport::new(
+            config.outbound_allow_insecure,
+        )?))
+    } else {
+        None
+    };
+    let did = identity.did.clone();
+    let state = AppState {
+        mediator: Arc::new(Mediator::new(
+            identity,
+            Arc::clone(&store),
+            limits,
+            transport,
+        )),
+        store,
+        rate_limit: config.rate_limit,
+        public_url: config.public_url.clone(),
+        client_ip_header: config
+            .client_ip_header
+            .as_deref()
+            .map(axum::http::HeaderName::try_from)
+            .transpose()?,
+    };
 
-    axum::serve(listener, router())
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    let listener = TcpListener::bind(config.bind).await?;
+    tracing::info!(addr = %listener.local_addr()?, %did, version = env!("CARGO_PKG_VERSION"), "almena node listening");
+
+    axum::serve(
+        listener,
+        router(state).into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
 
     tracing::info!("almena node stopped");
     Ok(())

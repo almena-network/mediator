@@ -13,13 +13,41 @@ tasks:
       - task --list
     silent: true
 
+  init:
+    desc: Create .env from .env.example (an existing .env is left untouched)
+    cmds:
+      - cp .env.example .env
+    status:
+      - test -f .env
+
+  redis:
+    desc: Start Redis in Docker (for task dev), reachable on 127.0.0.1
+    cmds:
+      - docker compose up --detach --wait redis
+
   dev:
-    desc: Run the node locally with readable debug logs
+    desc: Run the node locally with readable debug logs (starts Redis in Docker)
+    deps: [redis]
     env:
       ALMENA_LOG_FORMAT: pretty
+      ALMENA_REDIS_URL: redis://127.0.0.1:{{.ALMENA_REDIS_PORT | default "6379"}}
       RUST_LOG: '{{.RUST_LOG | default "almena_node=debug,tower_http=debug,info"}}'
     cmds:
       - cargo run
+
+  dev:memory:
+    desc: Run the node locally without Docker, storing everything in memory (lost on restart)
+    env:
+      ALMENA_LOG_FORMAT: pretty
+      ALMENA_REDIS_URL: memory://
+      RUST_LOG: '{{.RUST_LOG | default "almena_node=debug,tower_http=debug,info"}}'
+    cmds:
+      - cargo run
+
+  smoke:
+    desc: "End-to-end check of a running node: mediation, a forwarded message, pickup (URL: task smoke -- http://host:port)"
+    cmds:
+      - cargo run --quiet -p almena-node --example smoke -- {{.CLI_ARGS | default (printf "http://localhost:%s" (.ALMENA_NODE_PORT | default "8080"))}}
 
   build:
     desc: Build the release binary (target/release/almena-node)
@@ -28,6 +56,14 @@ tasks:
 
   test:
     desc: Run the test suite
+    cmds:
+      - cargo test --locked {{.CLI_ARGS}}
+
+  test:redis:
+    desc: Run the test suite including the Redis store tests (starts Redis in Docker)
+    deps: [redis]
+    env:
+      ALMENA_TEST_REDIS_URL: redis://127.0.0.1:{{.ALMENA_REDIS_PORT | default "6379"}}
     cmds:
       - cargo test --locked {{.CLI_ARGS}}
 
@@ -73,6 +109,13 @@ tasks:
     desc: Follow the node's container logs
     cmds:
       - docker compose logs --follow node
+
+  did:
+    desc: Show the running node's DID document
+    cmds:
+      - curl --fail --silent --show-error http://localhost:{{.ALMENA_NODE_PORT | default "8080"}}/.well-known/did.json
+      - echo
+    silent: true
 
   health:
     desc: Query the running node's health endpoint
