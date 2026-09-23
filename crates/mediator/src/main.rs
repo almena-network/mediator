@@ -97,7 +97,7 @@ async fn main() -> Result<()> {
         almena_mediator::metrics::serve(addr).await?;
     }
     let listener = TcpListener::bind(config.bind).await?;
-    tracing::info!(addr = %listener.local_addr()?, %did, version = env!("CARGO_PKG_VERSION"), "almena mediator listening");
+    tracing::info!(addr = %listener.local_addr()?, %did, version = almena_mediator::VERSION, "almena mediator listening");
 
     axum::serve(
         listener,

@@ -442,7 +442,7 @@ async fn health(State(state): State<AppState>) -> (StatusCode, Json<Health>) {
     let body = Health {
         status: if healthy { "ok" } else { "degraded" },
         service: env!("CARGO_PKG_NAME"),
-        version: env!("CARGO_PKG_VERSION"),
+        version: crate::VERSION,
         did: state.mediator.identity().did.clone(),
         storage: if healthy { "ok" } else { "unavailable" },
         storage_kind: state.store.kind(),

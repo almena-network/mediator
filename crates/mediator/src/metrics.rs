@@ -181,7 +181,7 @@ impl Metrics {
         let _ = writeln!(
             out,
             "almena_mediator_info{{version=\"{}\"}} 1",
-            env!("CARGO_PKG_VERSION")
+            crate::VERSION
         );
 
         family(

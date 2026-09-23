@@ -48,7 +48,7 @@ impl HttpTransport {
             }
         });
         let mut builder = reqwest::Client::builder()
-            .user_agent(concat!("almena-mediator/", env!("CARGO_PKG_VERSION")))
+            .user_agent(format!("almena-mediator/{}", crate::VERSION))
             .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(15))
             .redirect(redirect);

@@ -163,7 +163,7 @@ fn http_client() -> Result<reqwest::Client> {
     // reqwest is built without a default crypto provider; rustls uses ring.
     let _ = rustls::crypto::ring::default_provider().install_default();
     reqwest::Client::builder()
-        .user_agent(concat!("almena-mediator/", env!("CARGO_PKG_VERSION")))
+        .user_agent(format!("almena-mediator/{}", crate::VERSION))
         .connect_timeout(Duration::from_secs(5))
         .timeout(Duration::from_secs(10))
         .build()

@@ -16,6 +16,8 @@ RUN mkdir -p crates/didcomm/src crates/mediator/src crates/interop/src \
     && rm -rf crates/didcomm/src crates/mediator/src crates/interop/src
 
 COPY crates ./crates
+# The image's version (year.month.sequence), compiled in; unset: Cargo.toml's.
+ARG ALMENA_VERSION=
 RUN touch crates/didcomm/src/lib.rs crates/mediator/src/lib.rs crates/mediator/src/main.rs \
     && cargo build --release --locked -p almena-mediator
 
