@@ -4,7 +4,7 @@ version: "3"
 dotenv: [".env"]
 
 vars:
-  IMAGE: almena-node:dev
+  IMAGE: almena-mediator:dev
 
 tasks:
   default:
@@ -13,21 +13,57 @@ tasks:
       - task --list
     silent: true
 
+  init:
+    desc: Create .env from .env.example (an existing .env is left untouched)
+    cmds:
+      - cp .env.example .env
+    status:
+      - test -f .env
+
+  redis:
+    desc: Start Redis in Docker (for task dev), reachable on 127.0.0.1
+    cmds:
+      - docker compose up --detach --wait redis
+
   dev:
-    desc: Run the node locally with readable debug logs
+    desc: Run the mediator locally with readable debug logs (starts Redis in Docker)
+    deps: [redis]
     env:
       ALMENA_LOG_FORMAT: pretty
-      RUST_LOG: '{{.RUST_LOG | default "almena_node=debug,tower_http=debug,info"}}'
+      ALMENA_REDIS_URL: redis://127.0.0.1:{{.ALMENA_REDIS_PORT | default "6379"}}
+      RUST_LOG: '{{.RUST_LOG | default "almena_mediator=debug,tower_http=debug,info"}}'
     cmds:
       - cargo run
 
+  dev:memory:
+    desc: Run the mediator locally without Docker, storing everything in memory (lost on restart)
+    env:
+      ALMENA_LOG_FORMAT: pretty
+      ALMENA_REDIS_URL: memory://
+      RUST_LOG: '{{.RUST_LOG | default "almena_mediator=debug,tower_http=debug,info"}}'
+    cmds:
+      - cargo run
+
+  smoke:
+    desc: "End-to-end check of a running mediator: mediation, a forwarded message, pickup (URL: task smoke -- http://host:port)"
+    cmds:
+      - cargo run --quiet -p almena-mediator --example smoke -- {{.CLI_ARGS | default (printf "http://localhost:%s" (.ALMENA_MEDIATOR_PORT | default "8080"))}}
+
   build:
-    desc: Build the release binary (target/release/almena-node)
+    desc: Build the release binary (target/release/almena-mediator)
     cmds:
       - cargo build --release --locked
 
   test:
     desc: Run the test suite
+    cmds:
+      - cargo test --locked {{.CLI_ARGS}}
+
+  test:redis:
+    desc: Run the test suite including the Redis store tests (starts Redis in Docker)
+    deps: [redis]
+    env:
+      ALMENA_TEST_REDIS_URL: redis://127.0.0.1:{{.ALMENA_REDIS_PORT | default "6379"}}
     cmds:
       - cargo test --locked {{.CLI_ARGS}}
 
@@ -49,9 +85,10 @@ tasks:
       - task: test
 
   clean:
-    desc: Remove build output and the local Docker image
+    desc: Remove build output, the Veramo client's installed packages and copied certificate, and the local Docker image
     cmds:
       - cargo clean
+      - rm -rf interop/veramo/node_modules interop/veramo/caddy-root.crt
       - docker image rm -f {{.IMAGE}}
 
   docker:build:
@@ -60,7 +97,7 @@ tasks:
       - docker compose build
 
   up:
-    desc: Start the node in Docker (detached) and wait until it is healthy
+    desc: Start the mediator in Docker (detached) and wait until it is healthy
     cmds:
       - docker compose up --build --detach --wait
 
@@ -69,14 +106,33 @@ tasks:
     cmds:
       - docker compose down
 
-  logs:
-    desc: Follow the node's container logs
+  down:volume:
+    desc: Stop and remove the Docker containers and their volumes (deletes the Redis data)
     cmds:
-      - docker compose logs --follow node
+      - docker compose down --volumes --remove-orphans
+
+  rotate-keys:
+    desc: Replace the Docker mediator's keys with new ones and restart it (messages in flight to the old keys are refused)
+    prompt: Rotate the mediator's keys? Whatever was encrypted to the old ones will be refused.
+    cmds:
+      - docker compose exec mediator almena-mediator rotate-keys
+      - docker compose restart mediator
+
+  logs:
+    desc: Follow the mediator's container logs
+    cmds:
+      - docker compose logs --follow mediator
+
+  did:
+    desc: Show the running mediator's DID document
+    cmds:
+      - curl --fail --silent --show-error http://localhost:{{.ALMENA_MEDIATOR_PORT | default "8080"}}/.well-known/did.json
+      - echo
+    silent: true
 
   health:
-    desc: Query the running node's health endpoint
+    desc: Query the running mediator's health endpoint
     cmds:
-      - curl --fail --silent --show-error http://localhost:{{.ALMENA_NODE_PORT | default "8080"}}/health
+      - curl --fail --silent --show-error http://localhost:{{.ALMENA_MEDIATOR_PORT | default "8080"}}/health
       - echo
     silent: true

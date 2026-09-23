@@ -1,19 +1,35 @@
-# almena-node — notes for contributors and agents
+# almena-mediator — notes for contributors and agents
 
-Server of Almena Network, a decentralised messaging platform based on DIDComm Messaging v2.1
-(https://identity.foundation/didcomm-messaging/spec/v2.1/). DIDs follow W3C DID (https://www.w3.org/TR/did/). No DIDComm features yet.
+Server of Almena Network, a decentralised messaging platform based on DIDComm Messaging v2.0
+(https://identity.foundation/didcomm-messaging/spec/v2.0/). DIDs follow W3C DID (https://www.w3.org/TR/did/). Phases 1–5 of docs/didcomm.md are done: the DIDComm library, the mediator skeleton, mediation, live delivery / invitations / federation, and push wake-ups.
 
 This project is independent: it has its own Docker Compose file, env file and tooling.
 It shares nothing with `../wallet` except the protocol; the wallet may later depend on the `almena-didcomm` crate (see docs/didcomm.md).
 
 ## Layout
 
-- `src/lib.rs` — library: `config` (reads `ALMENA_*` env vars) and `routes` (axum router).
-- `src/main.rs` — binary: logging, server start, graceful shutdown, `healthcheck` subcommand.
-- `Dockerfile`, `compose.yml`, `.env.example` — container build and local run.
-- `docs/didcomm.md` — the DIDComm v2.1 design: role (pure mediator), protocols, crypto, storage (Redis), phases. Read it before DIDComm work and keep it current.
+Cargo workspace:
+
+- `crates/didcomm/` — `almena-didcomm`: DIDComm v2.0 library (keys, JWS, JWE anoncrypt/authcrypt, messages, pack/unpack, `did:key`/`did:peer` resolution, possession proofs). No HTTP or storage.
+  - `tests/spec/appendix.json` — the spec's Appendix A–C test vectors (errata noted in the file).
+- `crates/interop/` — `almena-interop`, tests only: `almena-didcomm` and the mediator against didcomm-rust (SICPA) and Affinidi's DIDComm library, both ways. Nothing else depends on it.
+- `interop/veramo/` — a Veramo client run against a live mediator (`node check.ts`); Veramo does not conform yet, see docs/didcomm.md §3.
+- `crates/mediator/` — `almena-mediator`: the service.
+  - `config` reads `ALMENA_*` env vars; `identity` holds the mediator's `did:web`, keys (`ALMENA_KEYS_PATH`) and DID document.
+  - `store/`: the `Store` trait with Redis and in-memory implementations, and a contract test both must pass.
+  - `dispatch/`: unpacks what reaches `/didcomm` or `/ws` and dispatches — `protocols.rs` (Trust Ping, Discover Features, problem reports), `mediation.rs` (Coordinate Mediation, `forward`), `pickup.rs` (Message Pickup), `live.rs` (live-delivery sessions), `relay.rs` (forwarding to other mediators), `devices.rs` (push protocols: device registration).
+  - `push/`: wake-ups through FCM (`fcm.rs`) and APNs (`apns.rs`), coalescing, the `Pusher` trait.
+  - `transport.rs`: outbound HTTPS with the SSRF guard, and the `did:web` resolver. `oob.rs`: the Out-of-Band invitation.
+  - `routes` is the axum router: HTTP and WebSocket endpoints, rate limit, HTTP status mapping.
+  - `metrics.rs`: Prometheus counters, served by their own listener (`ALMENA_METRICS_ADDR`), not by the router.
+  - `src/main.rs`: logging, start-up, graceful shutdown, `healthcheck` subcommand. `testing.rs` has a test mediator and wallets.
+  - `examples/smoke.rs`: end-to-end client against a running mediator (`task smoke`).
+- `Dockerfile`, `compose.yml` (mediator + Redis), `.env.example` — container build and local run. `data/` (local keys) is git-ignored.
+- `docs/didcomm.md` — the DIDComm v2.0 design: role (pure mediator), protocols, crypto, storage (Redis), phases. Read it before DIDComm work and keep it current.
 
 ## Rules
 
 - Everything is written in English.
+- `almena-didcomm` denies `unwrap`/`expect` outside tests (`clippy.toml` allows them in tests) and uses `thiserror`; the mediator binary uses `anyhow`.
+- Every HTTP endpoint of the public router is declared with `#[utoipa::path]` and registered through `OpenApiRouter` in `crates/mediator/src/routes.rs`, so it appears in `/openapi.json` and `/docs`. Keep the README endpoint table in sync.
 - Tasks live in `Taskfile.yml` (`task --list`). Before finishing a change: `task check` (fmt check, clippy -D warnings, tests).

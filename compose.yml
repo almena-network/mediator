@@ -1,19 +1,99 @@
-name: almena-node
+name: almena-mediator
 
 services:
-  node:
+  mediator:
     build:
       context: .
-    image: almena-node:dev
+    image: almena-mediator:dev
     restart: unless-stopped
     ports:
-      - "${ALMENA_NODE_PORT:-8080}:8080"
+      - "${ALMENA_MEDIATOR_PORT:-8080}:8080"
     environment:
+      ALMENA_PUBLIC_URL: ${ALMENA_PUBLIC_URL:-https://mediator.dev.almena.network}
+      ALMENA_REDIS_URL: redis://redis:6379
+      ALMENA_REDIS_PASSWORD: ${ALMENA_REDIS_PASSWORD:-}
+      ALMENA_MAX_MESSAGE_BYTES: ${ALMENA_MAX_MESSAGE_BYTES:-1048576}
+      ALMENA_QUEUE_TTL: ${ALMENA_QUEUE_TTL:-2592000}
+      ALMENA_QUEUE_MAX_MESSAGES: ${ALMENA_QUEUE_MAX_MESSAGES:-10000}
+      ALMENA_QUEUE_MAX_BYTES: ${ALMENA_QUEUE_MAX_BYTES:-104857600}
+      ALMENA_MAX_RECIPIENT_DIDS: ${ALMENA_MAX_RECIPIENT_DIDS:-100}
+      ALMENA_RECIPIENT_PROOF: ${ALMENA_RECIPIENT_PROOF:-required}
+      ALMENA_MEDIATION_TTL: ${ALMENA_MEDIATION_TTL:-7776000}
+      ALMENA_RATE_LIMIT: ${ALMENA_RATE_LIMIT:-60}
+      # Caddy sets X-Forwarded-For to the client address.
+      ALMENA_CLIENT_IP_HEADER: ${ALMENA_CLIENT_IP_HEADER:-x-forwarded-for}
+      ALMENA_FEDERATION: ${ALMENA_FEDERATION:-true}
+      ALMENA_OUTBOUND_ALLOW_INSECURE: ${ALMENA_OUTBOUND_ALLOW_INSECURE:-false}
+      ALMENA_PUSH_MODE: ${ALMENA_PUSH_MODE:-off}
+      ALMENA_PUSH_MIN_INTERVAL: ${ALMENA_PUSH_MIN_INTERVAL:-60}
+      ALMENA_FCM_SERVICE_ACCOUNT: ${ALMENA_FCM_SERVICE_ACCOUNT:-}
+      ALMENA_APNS_KEY_PATH: ${ALMENA_APNS_KEY_PATH:-}
+      ALMENA_APNS_KEY_ID: ${ALMENA_APNS_KEY_ID:-}
+      ALMENA_APNS_TEAM_ID: ${ALMENA_APNS_TEAM_ID:-}
+      ALMENA_APNS_TOPIC: ${ALMENA_APNS_TOPIC:-}
+      ALMENA_APNS_SANDBOX: ${ALMENA_APNS_SANDBOX:-false}
+      # Not published: scrape it from the Compose network (e.g. 0.0.0.0:9090).
+      ALMENA_METRICS_ADDR: ${ALMENA_METRICS_ADDR:-}
       ALMENA_LOG_FORMAT: ${ALMENA_LOG_FORMAT:-json}
       RUST_LOG: ${RUST_LOG:-info}
+    volumes:
+      # The mediator's private keys (keys.json). Mount a file here to bring your own.
+      - mediator-data:/data
+      # Push credentials (FCM service account JSON, APNs .p8), read-only.
+      - ./secrets:/secrets:ro
+    depends_on:
+      redis:
+        condition: service_healthy
     healthcheck:
-      test: ["CMD", "almena-node", "healthcheck"]
+      test: ["CMD", "almena-mediator", "healthcheck"]
       interval: 10s
       timeout: 3s
       retries: 3
       start_period: 5s
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      mediator:
+        condition: service_healthy
+
+  redis:
+    image: redis:8-alpine
+    restart: unless-stopped
+    # AOF so that queued messages survive restarts (docs/didcomm.md §8).
+    # An empty ALMENA_REDIS_PASSWORD leaves Redis without one.
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+      - --requirepass
+      - ${ALMENA_REDIS_PASSWORD:-}
+    environment:
+      REDIS_PASSWORD: ${ALMENA_REDIS_PASSWORD:-}
+    ports:
+      # Local access for `task dev`; bound to loopback only.
+      - "127.0.0.1:${ALMENA_REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      # redis-cli refuses an empty REDISCLI_AUTH, so set it only with a password.
+      test: ["CMD-SHELL", "[ -z \"$$REDIS_PASSWORD\" ] || export REDISCLI_AUTH=\"$$REDIS_PASSWORD\"; redis-cli ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  mediator-data:
+  redis-data:
+  caddy-data:
+  caddy-config:

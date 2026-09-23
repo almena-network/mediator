@@ -1,0 +1,44 @@
+[package]
+name = "almena-mediator"
+description = "Almena Network mediator: the server side of the platform (DIDComm Messaging v2.0)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "almena-mediator"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+almena-didcomm = { version = "0.1.0", path = "../didcomm" }
+anyhow = "1.0.104"
+async-trait = "0.1.92"
+axum = { version = "0.8.9", features = ["ws"] }
+redis = { version = "1.7.0", features = ["tokio-comp", "connection-manager"] }
+ring = "0.17.14"
+reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls-no-provider", "http2"] }
+rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-pki-types = { version = "1.15.1", features = ["std"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+sha2 = "0.11.0"
+thiserror = "2.0.20"
+tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "signal", "net", "sync", "time"] }
+tower-http = { version = "0.7.1", features = ["limit", "trace"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "json"] }
+url = "2.5.8"
+utoipa = { version = "6.0.0", features = ["axum_extras"] }
+utoipa-axum = "0.3.0"
+utoipa-scalar = { version = "0.4.0", features = ["axum"] }
+
+[dev-dependencies]
+futures-util = { version = "0.3.34", default-features = false, features = ["sink"] }
+http-body-util = "0.1.5"
+tempfile = "3.27.0"
+tokio-tungstenite = "0.30.0"
+tower = { version = "0.5.3", features = ["util"] }

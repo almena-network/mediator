@@ -1,25 +1,12 @@
-[package]
-name = "almena-node"
+[workspace]
+resolver = "3"
+members = ["crates/didcomm", "crates/mediator", "crates/interop"]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
-description = "Almena Network node: the server side of the platform (DIDComm v2.1 mediator, to come)"
 license = "Apache-2.0"
 publish = false
 
-[[bin]]
-name = "almena-node"
-path = "src/main.rs"
-
-[dependencies]
-anyhow = "1.0.104"
-axum = "0.8.9"
-serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.151"
-tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "signal", "net"] }
-tower-http = { version = "0.7.1", features = ["trace"] }
-tracing = "0.1.44"
-tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "json"] }
-
-[dev-dependencies]
-http-body-util = "0.1.5"
-tower = { version = "0.5.3", features = ["util"] }
+[workspace.lints.rust]
+unsafe_code = "forbid"

@@ -1,7 +1,10 @@
 target
+data
 Dockerfile
 .dockerignore
 *.md
 compose.yml
 .env
 .env.example
+secrets
+interop
