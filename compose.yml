@@ -52,13 +52,22 @@ services:
       start_period: 5s
 
   caddy:
-    image: caddy:2-alpine
+    # Caddy with the acme-dns module, for the DNS-01 challenge (Caddyfile).
+    build:
+      dockerfile_inline: |
+        FROM caddy:2-builder-alpine AS builder
+        RUN xcaddy build --with github.com/caddy-dns/acmedns
+        FROM caddy:2-alpine
+        COPY --from=builder /usr/bin/caddy /usr/bin/caddy
+    image: almena-caddy:dev
     restart: unless-stopped
     ports:
       - "80:80"
       - "443:443"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # acme-dns credentials (secrets/acme-dns.json, from `task acme-dns`).
+      - ./secrets:/secrets:ro
       - caddy-data:/data
       - caddy-config:/config
     depends_on:

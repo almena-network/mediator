@@ -215,7 +215,7 @@ The mediator's DID document advertises one `DIDCommMessaging` service with the H
 
 TLS is terminated in front of the mediator (reverse proxy) in production; the mediator itself speaks plain HTTP.
 
-**Decided — the first mediator is `https://mediator.almena.network`** (`did:web:mediator.almena.network`). Its deployment is deferred until the wallet needs a public mediator; development runs at `https://mediator.dev.almena.network` (Caddy with a local CA, `compose.yml`).
+**Decided — the first mediator is `https://mediator.almena.network`** (`did:web:mediator.almena.network`). Its deployment is deferred until the wallet needs a public mediator; development runs at `https://mediator.dev.almena.network` (Caddy with a Let's Encrypt certificate over DNS-01 delegated to acme-dns, `compose.yml`).
 
 ## 6. Mediator identity and keys
 

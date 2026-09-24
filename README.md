@@ -13,7 +13,7 @@ task init   # .env from .env.example
 task up     # mediator + Redis + Caddy (HTTPS) in Docker
 ```
 
-It answers at `https://mediator.dev.almena.network` (add the name to `/etc/hosts` pointing at this machine, and trust Caddy's local CA) and at `http://localhost:8080`. Without Docker, `task dev:memory` runs it in-process with everything in memory.
+It answers at `https://mediator.dev.almena.network` (add the name to `/etc/hosts` pointing at this machine; the Let's Encrypt certificate needs `task acme-dns` once, and the CNAME it prints created in the DNS) and at `http://localhost:8080`. Without Docker, `task dev:memory` runs it in-process with everything in memory.
 
 ```bash
 task health   # {"status":"ok",…}
