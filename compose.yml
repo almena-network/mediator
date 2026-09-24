@@ -68,7 +68,9 @@ services:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       # acme-dns credentials (secrets/acme-dns.json, from `task acme-dns`).
       - ./secrets:/secrets:ro
-      - caddy-data:/data
+      # Certificates and the ACME account, on the host (git-ignored) so they
+      # survive removing the containers and their volumes.
+      - ./caddy:/data
       - caddy-config:/config
     depends_on:
       mediator:
@@ -104,5 +106,4 @@ services:
 volumes:
   mediator-data:
   redis-data:
-  caddy-data:
   caddy-config:

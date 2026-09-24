@@ -7,4 +7,5 @@ compose.yml
 .env
 .env.example
 secrets
+caddy
 interop

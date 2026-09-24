@@ -2,6 +2,7 @@
 
 pub mod config;
 pub mod dispatch;
+pub mod home;
 pub mod identity;
 pub mod metrics;
 pub mod oob;

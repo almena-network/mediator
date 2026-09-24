@@ -39,6 +39,7 @@ Keep `keys.json` (the `mediator-data` volume) private and backed up: it is the m
 
 | | |
 |---|---|
+| `GET /`, `GET /icon.png` | Home page: icon, name, status, version, DID and the invitation QR |
 | `POST /didcomm`, `GET /ws` | DIDComm over HTTPS and WebSocket |
 | `GET /.well-known/did.json` | The mediator's DID document |
 | `GET /oob/invitation`, `GET /oob` | Out-of-Band mediation invitation (JSON, and a page for its QR URL) |

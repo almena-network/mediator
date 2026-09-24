@@ -4,6 +4,9 @@
 mediator.dev.almena.network {
 	tls {
 		dns acmedns /secrets/acme-dns.json
+		# Check the challenge record through public resolvers: a local ISP
+		# resolver can cache NXDOMAIN for it and Caddy then never sees it land.
+		resolvers 1.1.1.1 8.8.8.8
 	}
 	reverse_proxy mediator:8080
 }
