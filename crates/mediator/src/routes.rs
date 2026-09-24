@@ -88,8 +88,15 @@ pub fn router(state: AppState) -> Router {
 async fn home_page(State(state): State<AppState>) -> Html<String> {
     let healthy = state.store.ping().await.is_ok();
     let identity = state.mediator.identity();
-    let url = oob::invitation_url(&state.public_url, &oob::invitation(identity));
-    Html(home::page(healthy, crate::VERSION, &identity.did, &url))
+    let invitation = oob::invitation(identity);
+    let url = oob::invitation_url(&state.public_url, &invitation);
+    Html(home::page(
+        healthy,
+        crate::VERSION,
+        &identity.did,
+        &url,
+        &oob::wallet_url(&invitation),
+    ))
 }
 
 /// Icon
@@ -382,8 +389,8 @@ async fn invitation(State(state): State<AppState>) -> Json<InvitationBody> {
 )]
 async fn invitation_page(State(state): State<AppState>) -> Html<String> {
     let identity = state.mediator.identity();
-    let url = oob::invitation_url(&state.public_url, &oob::invitation(identity));
-    Html(oob::page(&identity.did, &url))
+    let wallet_url = oob::wallet_url(&oob::invitation(identity));
+    Html(oob::page(&identity.did, &wallet_url))
 }
 
 /// The client IP: the last address in the configured proxy header (the one
@@ -771,7 +778,7 @@ mod tests {
         assert!(html.contains("Almena Mediator"));
         assert!(html.contains("Operational"));
         assert!(html.contains("did:web:mediator.example.com"));
-        assert!(html.contains("https://mediator.example.com/oob?_oob="));
+        assert!(html.contains("almena://oob?_oob="));
         let (status, body) = get(state(), home::ICON_PATH).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body.starts_with(b"\x89PNG"));

@@ -157,7 +157,7 @@ Replies follow §5: they need the request's `from` and `return_route: "all"` (or
 
 ### Invitation (phase 4)
 
-`GET /oob/invitation` returns the mediator's Out-of-Band 2.0 invitation and its URL form, `<origin>/oob?_oob=<base64url(JSON)>`, for a link or QR code; `GET /oob` is the human-readable page the spec asks that URL to open in a browser. The invitation says `from: <mediator DID>`, `goal_code: request-mediate`, `accept: ["didcomm/v2"]`, with no attachments: the wallet resolves the mediator's DID and sends `mediate-request` (with the invitation `id` as `pthid`). **Decided:** the invitation never changes — its `id` is derived from the mediator's DID and it has no `created_time` — so a printed QR code keeps working.
+`GET /oob/invitation` returns the mediator's Out-of-Band 2.0 invitation and its URL form, `<origin>/oob?_oob=<base64url(JSON)>`, for a link or QR code; `GET /oob` is the human-readable page the spec asks that URL to open in a browser. The invitation says `from: <mediator DID>`, `goal_code: request-mediate`, `accept: ["didcomm/v2"]`, with no attachments: the wallet resolves the mediator's DID and sends `mediate-request` (with the invitation `id` as `pthid`). **Decided:** the invitation never changes — its `id` is derived from the mediator's DID and it has no `created_time` — so a printed QR code keeps working. **Decided:** the pages at `/` and `/oob` also link to `almena://oob?_oob=<same>`, the wallet's own scheme, for someone reading them on the phone that holds the wallet; QR codes keep the `https` form, which lands on the `/oob` page rather than nowhere when the wallet is not installed. The wallet accepts both forms.
 
 ## 5. Transports
 

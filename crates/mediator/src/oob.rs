@@ -14,6 +14,10 @@ use crate::identity::Identity;
 pub const INVITATION: &str = "https://didcomm.org/out-of-band/2.0/invitation";
 /// Path of the human-readable page the invitation URL points at.
 pub const OOB_PATH: &str = "/oob";
+/// The wallet's own URL scheme: a link with it opens the invitation in the
+/// Almena wallet, when installed. QR codes keep the `https` form, which lands
+/// on a page instead of nowhere when the wallet is missing.
+pub const WALLET_SCHEME: &str = "almena";
 /// Goal code of the mediator's invitation.
 pub const GOAL_CODE: &str = "request-mediate";
 
@@ -37,13 +41,23 @@ pub fn invitation(identity: &Identity) -> Message {
 
 /// The invitation as a URL: `<origin>/oob?_oob=<base64url(JSON)>`.
 pub fn invitation_url(public_url: &str, invitation: &Message) -> String {
-    // Serialising a Message cannot fail: it is plain JSON data.
-    let json = serde_json::to_string(invitation).unwrap_or_default();
-    format!("{public_url}{OOB_PATH}?_oob={}", b64::encode(json))
+    format!("{public_url}{OOB_PATH}?_oob={}", encode(invitation))
 }
 
-/// The page shown when someone opens the invitation URL in a browser.
-pub fn page(did: &str, url: &str) -> String {
+/// The invitation as a link into the wallet: `almena://oob?_oob=<base64url(JSON)>`,
+/// the same `_oob` parameter as [`invitation_url`].
+pub fn wallet_url(invitation: &Message) -> String {
+    format!("{WALLET_SCHEME}:/{OOB_PATH}?_oob={}", encode(invitation))
+}
+
+fn encode(invitation: &Message) -> String {
+    // Serialising a Message cannot fail: it is plain JSON data.
+    b64::encode(serde_json::to_string(invitation).unwrap_or_default())
+}
+
+/// The page shown when someone opens the invitation URL in a browser, with a
+/// link that opens the invitation in the wallet (`wallet_url`).
+pub fn page(did: &str, wallet_url: &str) -> String {
     let escape = |s: &str| {
         s.replace('&', "&amp;")
             .replace('<', "&lt;")
@@ -59,12 +73,12 @@ pub fn page(did: &str, url: &str) -> String {
 <body>
 <h1>Almena mediator</h1>
 <p>This is an invitation to use this mediator on Almena Network.
-Open it with the Almena wallet: scan it as a QR code or paste this link into the app.</p>
-<p><a href="{url}">Invitation link</a></p>
+Open it in the Almena wallet, or scan its QR code with the wallet.</p>
+<p><a href="{wallet_url}">Open in Almena wallet</a></p>
 <p>Mediator DID: <code>{did}</code></p>
 </body></html>
 "#,
-        url = escape(url),
+        wallet_url = escape(wallet_url),
         did = escape(did),
     )
 }
@@ -81,7 +95,13 @@ mod tests {
         assert_eq!(first.id.len(), 32);
         assert_eq!(first.from.as_deref(), Some("did:web:mediator.example.com"));
 
+        let wallet = wallet_url(&first);
+        assert!(wallet.starts_with("almena://oob?_oob="));
         let url = invitation_url("https://mediator.example.com", &first);
+        assert_eq!(
+            url.split_once('?').unwrap().1,
+            wallet.split_once('?').unwrap().1
+        );
         let encoded = url.split_once("?_oob=").unwrap().1;
         let decoded: Message = serde_json::from_slice(&b64::decode(encoded).unwrap()).unwrap();
         assert_eq!(decoded, first);
