@@ -16,8 +16,8 @@ use utoipa_axum::{router::OpenApiRouter, routes};
 use utoipa_scalar::{Scalar, Servable};
 
 use crate::dispatch::{Mediator, Outcome, ReceiveError};
-use crate::oob;
 use crate::store::Store;
+use crate::{home, oob};
 
 /// Where the interactive API reference and the raw OpenAPI document are served.
 pub const DOCS_PATH: &str = "/docs";
@@ -58,6 +58,8 @@ pub struct AppState {
 pub fn router(state: AppState) -> Router {
     let max_body = state.mediator.limits().max_message_bytes;
     let (router, api) = OpenApiRouter::with_openapi(ApiDoc::openapi())
+        .routes(routes!(home_page))
+        .routes(routes!(icon))
         .routes(routes!(receive))
         .routes(routes!(websocket))
         .routes(routes!(did_document))
@@ -70,6 +72,43 @@ pub fn router(state: AppState) -> Router {
         .merge(docs(api))
         .layer(DefaultBodyLimit::max(max_body))
         .layer(TraceLayer::new_for_http())
+}
+
+/// Home page
+///
+/// What a browser shows at the mediator's root: its icon and name, and the
+/// status, version and DID that `/health` also reports, and the mediation
+/// invitation as a QR code for the wallet.
+#[utoipa::path(
+    get,
+    path = "/",
+    tag = "operations",
+    responses((status = 200, description = "HTML page", content_type = "text/html"))
+)]
+async fn home_page(State(state): State<AppState>) -> Html<String> {
+    let healthy = state.store.ping().await.is_ok();
+    let identity = state.mediator.identity();
+    let url = oob::invitation_url(&state.public_url, &oob::invitation(identity));
+    Html(home::page(healthy, crate::VERSION, &identity.did, &url))
+}
+
+/// Icon
+///
+/// The mediator's icon, used by the home page and as its favicon.
+#[utoipa::path(
+    get,
+    path = "/icon.png",
+    tag = "operations",
+    responses((status = 200, description = "PNG image", content_type = "image/png"))
+)]
+async fn icon() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "image/png"),
+            (header::CACHE_CONTROL, "public, max-age=86400"),
+        ],
+        home::ICON,
+    )
 }
 
 fn docs(api: OpenApiDoc) -> Router {
@@ -722,6 +761,20 @@ mod tests {
                 .unwrap()
                 .starts_with("https://mediator.example.com/oob?_oob=")
         );
+    }
+
+    #[tokio::test]
+    async fn home_page_shows_the_name_and_its_icon_is_served() {
+        let (status, body) = get(state(), "/").await;
+        assert_eq!(status, StatusCode::OK);
+        let html = String::from_utf8(body).unwrap();
+        assert!(html.contains("Almena Mediator"));
+        assert!(html.contains("Operational"));
+        assert!(html.contains("did:web:mediator.example.com"));
+        assert!(html.contains("https://mediator.example.com/oob?_oob="));
+        let (status, body) = get(state(), home::ICON_PATH).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.starts_with(b"\x89PNG"));
     }
 
     #[tokio::test]

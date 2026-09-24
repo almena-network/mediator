@@ -2,8 +2,9 @@
 //!
 //! Every request carries a JWT signed with the key (ES256), reused for 50
 //! minutes as Apple asks (no more than one new token every 20 minutes, none
-//! older than an hour). The wake-up is a background notification
-//! (`content-available: 1`), which iOS delivers at priority 5.
+//! older than an hour). The wake-up is an alert whose words are keys into the
+//! app's own strings, delivered at priority 10 and collapsed into the one
+//! before it.
 
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -15,7 +16,7 @@ use ring::rand::SystemRandom;
 use ring::signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair};
 use serde_json::{Value, json};
 
-use super::{Sent, WAKE, jwt};
+use super::{BODY_KEY, Sent, TITLE_KEY, WAKE, jwt};
 
 const PRODUCTION_URL: &str = "https://api.push.apple.com";
 const SANDBOX_URL: &str = "https://api.sandbox.push.apple.com";
@@ -86,9 +87,10 @@ impl Apns {
             .post(format!("{}/3/device/{token}", self.url))
             .bearer_auth(self.provider_token()?)
             .header("apns-topic", &self.topic)
-            .header("apns-push-type", "background")
-            .header("apns-priority", "5")
-            .json(&json!({"aps": {"content-available": 1}, "type": WAKE}))
+            .header("apns-push-type", "alert")
+            .header("apns-priority", "10")
+            .header("apns-collapse-id", WAKE)
+            .json(&payload())
             .send()
             .await?;
         let status = response.status();
@@ -142,6 +144,19 @@ impl Apns {
     }
 }
 
+/// The notification: a title and a text by key, the default sound, all in one
+/// thread.
+fn payload() -> Value {
+    json!({
+        "aps": {
+            "alert": {"title-loc-key": TITLE_KEY, "loc-key": BODY_KEY},
+            "sound": "default",
+            "thread-id": WAKE,
+        },
+        "type": WAKE,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -175,9 +190,11 @@ mod tests {
                      Json(body): Json<Value>| async move {
                         a.requests.fetch_add(1, Ordering::SeqCst);
                         assert_eq!(headers["apns-topic"], "network.almena.wallet");
-                        assert_eq!(headers["apns-push-type"], "background");
-                        assert_eq!(headers["apns-priority"], "5");
-                        assert_eq!(body, json!({"aps": {"content-available": 1}, "type": WAKE}));
+                        assert_eq!(headers["apns-push-type"], "alert");
+                        assert_eq!(headers["apns-priority"], "10");
+                        assert_eq!(headers["apns-collapse-id"], WAKE);
+                        assert_eq!(body, payload());
+                        assert_eq!(body["aps"]["alert"]["loc-key"], BODY_KEY);
                         let bearer = headers["authorization"].to_str().unwrap();
                         let jwt = bearer.strip_prefix("Bearer ").unwrap();
                         let (input, header, claims, signature) = jwt::decode(jwt);

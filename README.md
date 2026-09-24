@@ -13,7 +13,7 @@ task init   # .env from .env.example
 task up     # mediator + Redis + Caddy (HTTPS) in Docker
 ```
 
-It answers at `https://mediator.dev.almena.network` (add the name to `/etc/hosts` pointing at this machine, and trust Caddy's local CA) and at `http://localhost:8080`. Without Docker, `task dev:memory` runs it in-process with everything in memory.
+It answers at `https://mediator.dev.almena.network` (add the name to `/etc/hosts` pointing at this machine; the Let's Encrypt certificate needs `task acme-dns` once, and the CNAME it prints created in the DNS) and at `http://localhost:8080`. Without Docker, `task dev:memory` runs it in-process with everything in memory.
 
 ```bash
 task health   # {"status":"ok",…}
@@ -39,6 +39,7 @@ Keep `keys.json` (the `mediator-data` volume) private and backed up: it is the m
 
 | | |
 |---|---|
+| `GET /`, `GET /icon.png` | Home page: icon, name, status, version, DID and the invitation QR |
 | `POST /didcomm`, `GET /ws` | DIDComm over HTTPS and WebSocket |
 | `GET /.well-known/did.json` | The mediator's DID document |
 | `GET /oob/invitation`, `GET /oob` | Out-of-Band mediation invitation (JSON, and a page for its QR URL) |

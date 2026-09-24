@@ -2,7 +2,9 @@
 //!
 //! Authenticates with the wallet app's service account: a JWT signed with
 //! its RSA key is exchanged for an OAuth 2 access token, cached until shortly
-//! before it expires. The wake-up is a high-priority data message.
+//! before it expires. The wake-up is a high-priority notification whose words
+//! are keys into the app's string resources, tagged so that a second one
+//! replaces the first.
 
 use std::path::Path;
 use std::sync::Mutex;
@@ -17,7 +19,7 @@ use ring::signature::{RSA_PKCS1_SHA256, RsaKeyPair};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{Sent, WAKE, jwt};
+use super::{BODY_KEY, Sent, TITLE_KEY, WAKE, jwt};
 
 const SCOPE: &str = "https://www.googleapis.com/auth/firebase.messaging";
 const FCM_URL: &str = "https://fcm.googleapis.com";
@@ -76,7 +78,15 @@ impl Fcm {
             .json(&json!({"message": {
                 "token": token,
                 "data": {"type": WAKE},
-                "android": {"priority": "high"},
+                "android": {
+                    "priority": "high",
+                    "collapse_key": WAKE,
+                    "notification": {
+                        "title_loc_key": TITLE_KEY,
+                        "body_loc_key": BODY_KEY,
+                        "tag": WAKE,
+                    },
+                },
             }}))
             .send()
             .await?;
@@ -226,6 +236,7 @@ mod tests {
                     let message = &body["message"];
                     assert_eq!(message["data"], json!({"type": WAKE}));
                     assert_eq!(message["android"]["priority"], "high");
+                    assert_eq!(message["android"]["notification"]["body_loc_key"], BODY_KEY);
                     match message["token"].as_str().unwrap() {
                         "good" => (StatusCode::OK, Json(json!({"name": "projects/x/messages/1"}))),
                         "gone" => (

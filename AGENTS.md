@@ -21,10 +21,11 @@ Cargo workspace:
   - `push/`: wake-ups through FCM (`fcm.rs`) and APNs (`apns.rs`), coalescing, the `Pusher` trait.
   - `transport.rs`: outbound HTTPS with the SSRF guard, and the `did:web` resolver. `oob.rs`: the Out-of-Band invitation.
   - `routes` is the axum router: HTTP and WebSocket endpoints, rate limit, HTTP status mapping.
+  - `home.rs`: the page at `/` (icon, name, and the status, version and DID `/health` also gives, and the invitation QR); the icon is `crates/mediator/assets/icon.png`, compiled in.
   - `metrics.rs`: Prometheus counters, served by their own listener (`ALMENA_METRICS_ADDR`), not by the router.
   - `src/main.rs`: logging, start-up, graceful shutdown, `healthcheck` subcommand. `testing.rs` has a test mediator and wallets.
   - `examples/smoke.rs`: end-to-end client against a running mediator (`task smoke`).
-- `Dockerfile`, `compose.yml` (mediator + Redis), `.env.example` — container build and local run. `data/` (local keys) is git-ignored.
+- `Dockerfile`, `compose.yml` (mediator + Redis), `.env.example` — container build and local run. `data/` (local keys) and `caddy/` (Caddy's certificates and ACME account) are git-ignored.
 - `docs/didcomm.md` — the DIDComm v2.0 design: role (pure mediator), protocols, crypto, storage (Redis), phases. Read it before DIDComm work and keep it current.
 
 ## Rules
