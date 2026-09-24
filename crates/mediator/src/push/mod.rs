@@ -26,8 +26,17 @@ pub use self::fcm::Fcm;
 use crate::metrics::{METRICS, Push};
 use crate::store::Store;
 
-/// The `type` of every push payload. Nothing else is sent.
+/// The `type` of every push payload, and the tag that collapses one
+/// notification into the next.
 pub const WAKE: &str = "almena.wake";
+
+/// The keys of the notification's title and text in the wallet app's own
+/// strings (Android string resources, iOS `Localizable.strings`), so the device
+/// says it in its own language and the mediator never writes a word of it.
+/// Nothing in the notification is about the message: no sender, no recipient
+/// DID, no count.
+pub const TITLE_KEY: &str = "almena_wake_title";
+pub const BODY_KEY: &str = "almena_wake_body";
 
 /// A push service a device token belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
