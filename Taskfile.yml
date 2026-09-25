@@ -120,9 +120,11 @@ tasks:
       - test -f secrets/acme-dns.json
 
   acme-dns:cname:
-    desc: Print the CNAME that delegates the DNS-01 challenge to acme-dns
+    desc: Print the CNAME that delegates the DNS-01 challenge for ALMENA_DOMAIN to acme-dns
+    requires:
+      vars: [ALMENA_DOMAIN]
     cmds:
-      - 'echo "_acme-challenge.mediator.dev.almena.network  CNAME  $(jq -r .fulldomain secrets/acme-dns.json)"'
+      - 'echo "_acme-challenge.{{.ALMENA_DOMAIN}}  CNAME  $(jq -r .fulldomain secrets/acme-dns.json)"'
     silent: true
 
   down:

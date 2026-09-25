@@ -322,7 +322,15 @@ fn turn(lookup: &impl Fn(&str) -> Option<String>) -> Result<Option<TurnConfig>> 
     let (urls, secret) = match (set("ALMENA_TURN_URLS"), set("ALMENA_TURN_SECRET")) {
         (None, None) => return Ok(None),
         (Some(urls), Some(secret)) => (urls, secret),
-        _ => anyhow::bail!("TURN needs both ALMENA_TURN_URLS and ALMENA_TURN_SECRET"),
+        (Some(_), None) => anyhow::bail!(
+            "ALMENA_TURN_URLS is set but ALMENA_TURN_SECRET is empty: generate one with \
+             `openssl rand -hex 32`, set it in .env for both the mediator and coturn, or \
+             empty ALMENA_TURN_URLS to turn TURN off"
+        ),
+        (None, Some(_)) => anyhow::bail!(
+            "ALMENA_TURN_SECRET is set but ALMENA_TURN_URLS is empty: list the turn: URIs \
+             wallets reach coturn at, or empty ALMENA_TURN_SECRET to turn TURN off"
+        ),
     };
     let urls: Vec<String> = urls
         .split(',')

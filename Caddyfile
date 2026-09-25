@@ -1,7 +1,8 @@
 # HTTPS in front of the mediator for development, with a Let's Encrypt
 # certificate: the wallet trusts only the public roots. The DNS-01 challenge is
 # delegated to acme-dns (`task acme-dns`), so the machine need not be reachable.
-mediator.dev.almena.network {
+# The site is ALMENA_DOMAIN (.env), passed in by compose.yml.
+{$ALMENA_DOMAIN} {
 	tls {
 		dns acmedns /secrets/acme-dns.json
 		# Check the challenge record through public resolvers: a local ISP

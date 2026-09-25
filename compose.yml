@@ -9,7 +9,7 @@ services:
     ports:
       - "${ALMENA_MEDIATOR_PORT:-8080}:8080"
     environment:
-      ALMENA_PUBLIC_URL: ${ALMENA_PUBLIC_URL:-https://mediator.dev.almena.network}
+      ALMENA_PUBLIC_URL: ${ALMENA_PUBLIC_URL:-https://${ALMENA_DOMAIN}}
       ALMENA_REDIS_URL: redis://redis:6379
       ALMENA_REDIS_PASSWORD: ${ALMENA_REDIS_PASSWORD:-}
       ALMENA_MAX_MESSAGE_BYTES: ${ALMENA_MAX_MESSAGE_BYTES:-1048576}
@@ -65,6 +65,9 @@ services:
         COPY --from=builder /usr/bin/caddy /usr/bin/caddy
     image: almena-caddy:dev
     restart: unless-stopped
+    environment:
+      # The Caddyfile's site.
+      ALMENA_DOMAIN: ${ALMENA_DOMAIN:-}
     ports:
       - "80:80"
       - "443:443"
@@ -86,13 +89,21 @@ services:
     image: coturn/coturn:4.18
     profiles: [turn]
     restart: unless-stopped
+    # With no secret, anybody could mint credentials: refuse to start.
+    entrypoint:
+      - sh
+      - -c
+      - '[ -n "$$ALMENA_TURN_SECRET" ] || { echo "ALMENA_TURN_SECRET is empty: set it in .env (openssl rand -hex 32), the same the mediator uses" >&2; exit 1; }; exec docker-entrypoint.sh "$$@"'
+      - coturn
+    environment:
+      ALMENA_TURN_SECRET: ${ALMENA_TURN_SECRET:-}
     command:
       - -n
       - --log-file=stdout
       # Time-limited credentials from the mediator (TURN REST API).
       - --use-auth-secret
       - --static-auth-secret=${ALMENA_TURN_SECRET:-}
-      - --realm=${ALMENA_TURN_REALM:-almena.network}
+      - --realm=${ALMENA_TURN_REALM:-${ALMENA_DOMAIN}}
       - --listening-port=3478
       # Media is DTLS-SRTP end to end; TURN over TLS is not offered yet.
       - --no-tls
