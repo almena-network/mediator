@@ -1,5 +1,5 @@
 //! Federation: passing a `forward` payload on to the mediator that mediates its
-//! `next` recipient (docs/didcomm.md §7).
+//! `next` recipient (SPEC.md §6.7).
 //!
 //! The payload is routed as a sender would route it: resolve `next`, wrap it
 //! for the hops its `DIDCommMessaging` service lists, POST it to the service

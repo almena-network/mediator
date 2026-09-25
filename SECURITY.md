@@ -43,5 +43,5 @@ Out of scope:
 - third-party DIDComm implementations used only by the interoperability
   tests (`crates/interop`, `interop/`).
 
-The design, including what the mediator deliberately does not do, is in
-[docs/didcomm.md](docs/didcomm.md).
+The specification and design, including what the mediator deliberately does
+not do, are in [SPEC.md](SPEC.md).

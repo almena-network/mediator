@@ -79,7 +79,7 @@ services:
   redis:
     image: redis:8-alpine
     restart: unless-stopped
-    # AOF so that queued messages survive restarts (docs/didcomm.md §8).
+    # AOF so that queued messages survive restarts (SPEC.md, Appendix D).
     # An empty ALMENA_REDIS_PASSWORD leaves Redis without one.
     command:
       - redis-server

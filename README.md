@@ -2,7 +2,7 @@
 
 The mediator of Almena Network: a [DIDComm Messaging v2.0](https://identity.foundation/didcomm-messaging/spec/v2.0/) mailbox for wallets. It queues end-to-end encrypted messages until their wallet picks them up (over HTTPS, or live over a WebSocket), relays messages for wallets mediated elsewhere, and wakes mobile wallets with content-free push notifications. It never sees message content.
 
-It implements Coordinate Mediation 3.0, Routing 2.0, Message Pickup 3.0 (with live mode), Trust Ping, Discover Features, Report Problem and Out-of-Band 2.0, on top of `almena-didcomm` (`crates/didcomm`), its own DIDComm library. The design and every decision behind it are in [docs/didcomm.md](docs/didcomm.md).
+It implements Coordinate Mediation 3.0, Routing 2.0, Message Pickup 3.0 (with live mode), Trust Ping, Discover Features, Report Problem and Out-of-Band 2.0, on top of `almena-didcomm` (`crates/didcomm`), its own DIDComm library. [SPEC.md](SPEC.md) specifies the Almena Mediator — its profile of DIDComm v2.0 and what it adds — and, in its appendices, the design and every decision behind it.
 
 ## Quick start
 

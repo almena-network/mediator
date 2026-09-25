@@ -50,7 +50,7 @@ pub(crate) async fn remove_idle(
     Ok(total)
 }
 
-/// Limits the mediator enforces (docs/didcomm.md §9).
+/// Limits the mediator enforces (SPEC.md §11).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Limits {
     pub max_message_bytes: usize,
@@ -59,7 +59,7 @@ pub struct Limits {
     /// Least time between two pushes to one mediation.
     pub push_min_interval_secs: u64,
     /// Registering a recipient DID other than the mediation's own needs a
-    /// possession proof signed by that DID (docs/didcomm.md §4).
+    /// possession proof signed by that DID (SPEC.md §6.2).
     pub recipient_proof: bool,
     /// A mediation whose wallet sends nothing for this long is removed with
     /// all it owns; 0 keeps mediations forever.
@@ -380,7 +380,7 @@ impl Mediator {
     /// connection when the request asks for it (`return_route`, implied on a
     /// WebSocket). Otherwise an authenticated sender gets it through
     /// [`Mediator::send_reply`]; an anonymous one gets nothing
-    /// (docs/didcomm.md §5).
+    /// (SPEC.md §6.6).
     async fn route_back(
         &self,
         request: &Message,

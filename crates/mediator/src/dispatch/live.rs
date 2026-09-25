@@ -4,7 +4,7 @@
 //!
 //! Live messages are pushed *and* stay queued until acknowledged with
 //! `messages-received`, so a connection that drops mid-delivery loses
-//! nothing (docs/didcomm.md §5).
+//! nothing (SPEC.md D7).
 
 use std::collections::HashMap;
 use std::sync::Mutex;

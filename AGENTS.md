@@ -1,10 +1,10 @@
 # almena-mediator — notes for contributors and agents
 
 Server of Almena Network, a decentralised messaging platform based on DIDComm Messaging v2.0
-(https://identity.foundation/didcomm-messaging/spec/v2.0/). DIDs follow W3C DID (https://www.w3.org/TR/did/). Phases 1–5 of docs/didcomm.md are done: the DIDComm library, the mediator skeleton, mediation, live delivery / invitations / federation, and push wake-ups.
+(https://identity.foundation/didcomm-messaging/spec/v2.0/). DIDs follow W3C DID (https://www.w3.org/TR/did/). Phases 1–5 of SPEC.md (Appendix I) are done: the DIDComm library, the mediator skeleton, mediation, live delivery / invitations / federation, and push wake-ups.
 
 This project is independent: it has its own Docker Compose file, env file and tooling.
-It shares nothing with `../wallet` except the protocol; the wallet may later depend on the `almena-didcomm` crate (see docs/didcomm.md).
+It shares nothing with `../wallet` except the protocol; the wallet may later depend on the `almena-didcomm` crate (see SPEC.md, Appendix B).
 
 ## Layout
 
@@ -13,7 +13,7 @@ Cargo workspace:
 - `crates/didcomm/` — `almena-didcomm`: DIDComm v2.0 library (keys, JWS, JWE anoncrypt/authcrypt, messages, pack/unpack, `did:key`/`did:peer` resolution, possession proofs). No HTTP or storage.
   - `tests/spec/appendix.json` — the spec's Appendix A–C test vectors (errata noted in the file).
 - `crates/interop/` — `almena-interop`, tests only: `almena-didcomm` and the mediator against didcomm-rust (SICPA) and Affinidi's DIDComm library, both ways. Nothing else depends on it.
-- `interop/veramo/` — a Veramo client run against a live mediator (`node check.ts`); Veramo does not conform yet, see docs/didcomm.md §3.
+- `interop/veramo/` — a Veramo client run against a live mediator (`node check.ts`); Veramo does not conform yet, see SPEC.md §10.
 - `crates/mediator/` — `almena-mediator`: the service.
   - `config` reads `ALMENA_*` env vars; `identity` holds the mediator's `did:web`, keys (`ALMENA_KEYS_PATH`) and DID document.
   - `store/`: the `Store` trait with Redis and in-memory implementations, and a contract test both must pass.
@@ -26,7 +26,7 @@ Cargo workspace:
   - `src/main.rs`: logging, start-up, graceful shutdown, `healthcheck` subcommand. `testing.rs` has a test mediator and wallets.
   - `examples/smoke.rs`: end-to-end client against a running mediator (`task smoke`).
 - `Dockerfile`, `compose.yml` (mediator + Redis), `.env.example` — container build and local run. `data/` (local keys) and `caddy/` (Caddy's certificates and ACME account) are git-ignored.
-- `docs/didcomm.md` — the DIDComm v2.0 design: role (pure mediator), protocols, crypto, storage (Redis), phases. Read it before DIDComm work and keep it current.
+- `SPEC.md` — the Almena Mediator specification: the DIDComm v2.0 profile, deviations and Almena's own extensions, with their sources; its appendices hold the design (decisions, code layout, storage, scaling, metrics, phases). Read it before DIDComm work and keep it current.
 
 ## Rules
 

@@ -1,4 +1,4 @@
-//! Push wake-ups (docs/didcomm.md §5).
+//! Push wake-ups (SPEC.md §6.4).
 //!
 //! When a message is queued for a mediation that has no live WebSocket
 //! session, the devices the wallet registered get a push that carries

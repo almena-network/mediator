@@ -20,7 +20,7 @@ pub async fn handle(
     let store = mediator.store();
     match message.type_.as_str() {
         protocols::MEDIATE_REQUEST => {
-            // Open with limits (docs/didcomm.md §9): every request is granted.
+            // Open with limits (SPEC.md §11): every request is granted.
             store.grant_mediation(requester, now()).await?;
             METRICS.mediation_granted();
             tracing::debug!(mediation = %requester, "mediation granted");

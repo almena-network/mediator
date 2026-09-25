@@ -18,7 +18,7 @@ task --list      # everything else
 ```
 
 [README.md](README.md) lists the configuration and endpoints;
-[docs/didcomm.md](docs/didcomm.md) is the design. Read the design before
+[SPEC.md](SPEC.md) is the specification and the design. Read it before
 changing anything DIDComm-related, and keep it current with your change.
 
 ## Making a change
