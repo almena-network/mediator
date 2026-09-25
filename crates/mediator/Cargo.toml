@@ -19,6 +19,7 @@ anyhow = "1.0.104"
 async-trait = "0.1.92"
 axum = { version = "0.8.9", features = ["ws"] }
 redis = { version = "1.7.0", features = ["tokio-comp", "connection-manager"] }
+base64 = "0.23.1"
 ring = "0.17.14"
 reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls-no-provider", "http2"] }
 rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12", "logging"] }

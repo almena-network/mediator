@@ -59,6 +59,21 @@ pub struct Config {
     pub outbound_allow_insecure: bool,
     /// Push wake-ups (`ALMENA_PUSH_*`, `ALMENA_FCM_*`, `ALMENA_APNS_*`).
     pub push: PushConfig,
+    /// TURN credentials for wallets' calls (`ALMENA_TURN_*`); `None`: off.
+    pub turn: Option<TurnConfig>,
+}
+
+/// The TURN server run beside the mediator (SPEC.md §6.9).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnConfig {
+    /// `turn:`/`turns:` URIs given to wallets, comma-separated
+    /// (`ALMENA_TURN_URLS`).
+    pub urls: Vec<String>,
+    /// Secret shared with the TURN server, coturn's `static-auth-secret`
+    /// (`ALMENA_TURN_SECRET`).
+    pub secret: Secret,
+    /// Seconds the credentials are valid (`ALMENA_TURN_TTL`).
+    pub ttl_secs: u64,
 }
 
 /// A value kept out of logs: `Debug` prints `<redacted>`.
@@ -132,6 +147,7 @@ impl Default for Config {
             federation: true,
             outbound_allow_insecure: false,
             push: PushConfig::default(),
+            turn: None,
         }
     }
 }
@@ -242,6 +258,7 @@ impl Config {
                 default.outbound_allow_insecure,
             )?,
             push: push(&lookup, default.push)?,
+            turn: turn(&lookup)?,
         };
         anyhow::ensure!(
             config.queue_max_bytes >= config.max_message_bytes as u64,
@@ -294,6 +311,38 @@ fn push(lookup: &impl Fn(&str) -> Option<String>, default: PushConfig) -> Result
         );
     }
     Ok(push)
+}
+
+/// Credentials last a day by default, the TURN REST API's suggestion: coturn
+/// checks them again on every refresh, so they must outlast the longest call.
+const TURN_TTL: u64 = 24 * 3600;
+
+fn turn(lookup: &impl Fn(&str) -> Option<String>) -> Result<Option<TurnConfig>> {
+    let set = |key: &str| lookup(key).filter(|v| !v.trim().is_empty());
+    let (urls, secret) = match (set("ALMENA_TURN_URLS"), set("ALMENA_TURN_SECRET")) {
+        (None, None) => return Ok(None),
+        (Some(urls), Some(secret)) => (urls, secret),
+        _ => anyhow::bail!("TURN needs both ALMENA_TURN_URLS and ALMENA_TURN_SECRET"),
+    };
+    let urls: Vec<String> = urls
+        .split(',')
+        .map(str::trim)
+        .filter(|u| !u.is_empty())
+        .map(str::to_owned)
+        .collect();
+    for url in &urls {
+        anyhow::ensure!(
+            (url.starts_with("turn:") || url.starts_with("turns:"))
+                && !url.contains(char::is_whitespace),
+            "invalid ALMENA_TURN_URLS entry: {url} (expected turn: or turns: URIs)"
+        );
+    }
+    anyhow::ensure!(!urls.is_empty(), "ALMENA_TURN_URLS lists no URI");
+    Ok(Some(TurnConfig {
+        urls,
+        secret: Secret(secret),
+        ttl_secs: positive(lookup, "ALMENA_TURN_TTL", TURN_TTL)?,
+    }))
 }
 
 /// `true`/`false` (also `1`/`0`), or `default` when unset.
@@ -422,6 +471,55 @@ mod tests {
         let apns = config.push.apns.unwrap();
         assert_eq!(apns.topic, "network.almena.wallet");
         assert!(apns.sandbox);
+    }
+
+    #[test]
+    fn reads_turn_settings() {
+        let config = Config::from_lookup(lookup(&[
+            (
+                "ALMENA_TURN_URLS",
+                "turn:t.example.com:3478?transport=udp, turn:t.example.com:3478?transport=tcp",
+            ),
+            ("ALMENA_TURN_SECRET", "sh4red"),
+            ("ALMENA_TURN_TTL", "600"),
+        ]))
+        .unwrap();
+        let turn = config.turn.as_ref().unwrap();
+        assert_eq!(
+            turn.urls,
+            [
+                "turn:t.example.com:3478?transport=udp",
+                "turn:t.example.com:3478?transport=tcp"
+            ]
+        );
+        assert_eq!(turn.ttl_secs, 600);
+        assert!(!format!("{config:?}").contains("sh4red"));
+        let default_ttl = Config::from_lookup(lookup(&[
+            ("ALMENA_TURN_URLS", "turns:t.example.com"),
+            ("ALMENA_TURN_SECRET", "s"),
+        ]))
+        .unwrap();
+        assert_eq!(default_ttl.turn.unwrap().ttl_secs, TURN_TTL);
+    }
+
+    #[test]
+    fn rejects_bad_turn_settings() {
+        let bad = |pairs: &[(&str, &str)]| Config::from_lookup(lookup(pairs)).is_err();
+        assert!(bad(&[("ALMENA_TURN_URLS", "turn:t.example.com")]));
+        assert!(bad(&[("ALMENA_TURN_SECRET", "s")]));
+        assert!(bad(&[
+            ("ALMENA_TURN_URLS", "stun:t.example.com"),
+            ("ALMENA_TURN_SECRET", "s")
+        ]));
+        assert!(bad(&[
+            ("ALMENA_TURN_URLS", " , "),
+            ("ALMENA_TURN_SECRET", "s")
+        ]));
+        assert!(bad(&[
+            ("ALMENA_TURN_URLS", "turn:t.example.com"),
+            ("ALMENA_TURN_SECRET", "s"),
+            ("ALMENA_TURN_TTL", "0")
+        ]));
     }
 
     #[test]

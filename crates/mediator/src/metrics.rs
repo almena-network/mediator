@@ -99,6 +99,7 @@ pub struct Metrics {
     live_sessions: AtomicI64,
     mediations_granted: AtomicU64,
     mediations_removed: AtomicU64,
+    turn_credentials: AtomicU64,
 }
 
 impl Default for Metrics {
@@ -124,6 +125,7 @@ impl Metrics {
             live_sessions: AtomicI64::new(0),
             mediations_granted: AtomicU64::new(0),
             mediations_removed: AtomicU64::new(0),
+            turn_credentials: AtomicU64::new(0),
         }
     }
 
@@ -165,6 +167,10 @@ impl Metrics {
 
     pub fn mediations_removed(&self, count: u64) {
         inc(&self.mediations_removed, count);
+    }
+
+    pub fn turn_credentials(&self) {
+        inc(&self.turn_credentials, 1);
     }
 
     /// The Prometheus text exposition format (version 0.0.4).
@@ -286,6 +292,18 @@ impl Metrics {
             out,
             "almena_mediations_removed_total {}",
             get(&self.mediations_removed)
+        );
+
+        family(
+            &mut out,
+            "almena_turn_credentials_total",
+            "counter",
+            "TURN credentials issued.",
+        );
+        let _ = writeln!(
+            out,
+            "almena_turn_credentials_total {}",
+            get(&self.turn_credentials)
         );
         out
     }

@@ -39,6 +39,12 @@ pub const DEVICE_INFO: &str = "device-info";
 /// `set-device-info` with.
 pub const ACK: &str = "https://didcomm.org/notification/1.0/ack";
 
+/// TURN credentials, an Almena protocol (SPEC.md §6.9).
+pub const TURN: &str = "https://almena.network/protocols/turn/1.0/";
+pub const TURN_CREDENTIALS_REQUEST: &str =
+    "https://almena.network/protocols/turn/1.0/credentials-request";
+pub const TURN_CREDENTIALS: &str = "https://almena.network/protocols/turn/1.0/credentials";
+
 /// The push protocol of `service`, with the trailing `/` of a message type.
 pub fn push_protocol(service: Service) -> &'static str {
     match service {
@@ -103,12 +109,14 @@ pub fn trust_ping(ping: &Message) -> Option<Message> {
 }
 
 /// Discover Features: a `disclose` listing the features that match any query,
-/// including the push protocols of the services in `push`. Unknown feature
-/// types match nothing, as the protocol requires.
+/// including the push protocols of the services in `push` and the TURN
+/// protocol when `turn` is on. Unknown feature types match nothing, as the
+/// protocol requires.
 pub fn discover_features(
     request: &Message,
     max_receive_bytes: usize,
     push: &[Service],
+    turn: bool,
 ) -> Result<Message, Problem> {
     let queries = request
         .body
@@ -144,6 +152,14 @@ pub fn discover_features(
                         "roles": ["notification-sender"],
                     }));
                 }
+            }
+            let id = TURN.trim_end_matches('/');
+            if turn && matches(pattern, id) {
+                disclosures.push(json!({
+                    "feature-type": "protocol",
+                    "id": id,
+                    "roles": ["server"],
+                }));
             }
         }
         if feature_type == "constraint" && matches(pattern, "max_receive_bytes") {
@@ -181,7 +197,7 @@ pub enum Problem {
     InvalidBody,
     /// `expires_time` has passed.
     Expired,
-    /// Mediation and pickup need an authcrypted sender.
+    /// Mediation, pickup, push and TURN messages need an authcrypted sender.
     Unauthenticated,
     /// The sender has no mediation with this mediator.
     NoMediation,
@@ -280,7 +296,7 @@ mod tests {
                 {"feature-type": "unknown", "match": "*"}
             ]}),
         );
-        let disclose = discover_features(&queries, 65536, &[]).unwrap();
+        let disclose = discover_features(&queries, 65536, &[], false).unwrap();
         assert_eq!(disclose.thid.as_deref(), Some(queries.id.as_str()));
         let disclosures = disclose.body["disclosures"].as_array().unwrap();
         assert_eq!(disclosures.len(), 2);
@@ -292,7 +308,7 @@ mod tests {
     fn discover_features_rejects_a_bad_body() {
         let queries = Message::new(QUERIES, json!({"queries": "all"}));
         assert_eq!(
-            discover_features(&queries, 1, &[]).unwrap_err(),
+            discover_features(&queries, 1, &[], false).unwrap_err(),
             Problem::InvalidBody
         );
     }

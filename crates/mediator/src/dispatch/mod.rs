@@ -8,6 +8,7 @@ mod mediation;
 mod pickup;
 pub mod protocols;
 mod relay;
+pub mod turn;
 
 use std::sync::Arc;
 
@@ -23,6 +24,7 @@ use crate::store::{QueueLimits, Queued, Store};
 use crate::transport::{Transport, WebResolver};
 use live::{LiveHub, Session};
 use protocols::Problem;
+use turn::TurnServer;
 
 /// How often idle mediations are looked for, and how many go per batch.
 const CLEANUP_EVERY: std::time::Duration = std::time::Duration::from_secs(3600);
@@ -114,6 +116,8 @@ pub struct Mediator {
     transport: Option<Arc<dyn Transport>>,
     /// Push wake-ups; `None` turns them off.
     pusher: Option<Arc<dyn Pusher>>,
+    /// TURN credentials; `None` turns the TURN protocol off.
+    turn: Option<TurnServer>,
 }
 
 impl Mediator {
@@ -140,6 +144,7 @@ impl Mediator {
             live: LiveHub::default(),
             transport,
             pusher: None,
+            turn: None,
         }
     }
 
@@ -147,6 +152,16 @@ impl Mediator {
     pub fn with_pusher(mut self, pusher: Arc<dyn Pusher>) -> Self {
         self.pusher = Some(pusher);
         self
+    }
+
+    /// Turns the TURN protocol on: wallets get credentials for `turn`.
+    pub fn with_turn(mut self, turn: TurnServer) -> Self {
+        self.turn = Some(turn);
+        self
+    }
+
+    pub(crate) fn turn(&self) -> Option<&TurnServer> {
+        self.turn.as_ref()
     }
 
     pub fn identity(&self) -> &Identity {
@@ -327,6 +342,7 @@ impl Mediator {
                         &message,
                         self.limits.max_message_bytes,
                         push,
+                        self.turn.is_some(),
                     ) {
                         Ok(disclose) => Handled::Reply(disclose),
                         Err(problem) => Handled::Problem(problem),
@@ -344,7 +360,8 @@ impl Mediator {
                 _ if t.starts_with(protocols::COORDINATE_MEDIATION)
                     || t.starts_with(protocols::PICKUP)
                     || t.starts_with(protocols::PUSH_FCM)
-                    || t.starts_with(protocols::PUSH_APNS) =>
+                    || t.starts_with(protocols::PUSH_APNS)
+                    || t.starts_with(protocols::TURN) =>
                 {
                     // The wallet is alive: its mediation is not idle.
                     if let Some(requester) = requester {
@@ -358,6 +375,9 @@ impl Mediator {
                         }
                         Some(requester) if t.starts_with(protocols::COORDINATE_MEDIATION) => {
                             mediation::handle(self, requester, &message).await?
+                        }
+                        Some(requester) if t.starts_with(protocols::TURN) => {
+                            turn::handle(self, requester, &message).await?
                         }
                         Some(requester) => devices::handle(self, requester, &message).await?,
                     }
@@ -1600,5 +1620,80 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
         panic!("the rejected token is still registered");
+    }
+
+    // ---- TURN credentials ----
+
+    #[tokio::test]
+    async fn turn_credentials_need_the_protocol_on_and_a_mediation() {
+        let bob = Wallet::new(Curve::X25519);
+        let off = mediator();
+        mediate(&off, &bob).await;
+        let report = bob
+            .request(&off, protocols::TURN_CREDENTIALS_REQUEST, json!({}))
+            .await;
+        assert_eq!(report.body["code"], "e.m.msg.unsupported-type");
+
+        let on = mediator().with_turn(TurnServer::new(
+            vec!["turn:turn.example.com:3478".into()],
+            "secret",
+            600,
+        ));
+        let report = bob
+            .request(&on, protocols::TURN_CREDENTIALS_REQUEST, json!({}))
+            .await;
+        assert_eq!(report.body["code"], "e.m.req.no-mediation");
+
+        mediate(&on, &bob).await;
+        let request = protocols::TURN_CREDENTIALS_REQUEST;
+        let credentials = bob.request(&on, request, json!({})).await;
+        assert_eq!(credentials.type_, protocols::TURN_CREDENTIALS);
+        assert_eq!(credentials.body["ttl"], 600);
+        let server = &credentials.body["ice_servers"][0];
+        assert_eq!(server["urls"], json!(["turn:turn.example.com:3478"]));
+        let expiry: u64 = server["username"]
+            .as_str()
+            .unwrap()
+            .split(':')
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(expiry > now() && expiry <= now() + 600);
+        assert!(server["credential"].is_string());
+
+        let disclose = bob
+            .request(
+                &on,
+                protocols::QUERIES,
+                json!({"queries": [{"feature-type": "protocol", "match": "https://almena.network/*"}]}),
+            )
+            .await;
+        assert_eq!(
+            disclose.body["disclosures"],
+            json!([{"feature-type": "protocol", "id": "https://almena.network/protocols/turn/1.0", "roles": ["server"]}])
+        );
+    }
+
+    #[tokio::test]
+    async fn turn_credentials_need_an_authenticated_sender() {
+        let mediator = mediator().with_turn(TurnServer::new(
+            vec!["turn:turn.example.com".into()],
+            "secret",
+            600,
+        ));
+        let bob = Wallet::new(Curve::X25519);
+        mediate(&mediator, &bob).await;
+        let request = Message::new(protocols::TURN_CREDENTIALS_REQUEST, json!({}))
+            .from(&bob.did)
+            .header("return_route", json!("all"));
+        let packed = bob.send(mediator.identity(), request, true).await;
+        let Outcome::Reply(reply) = mediator.receive(&packed, None).await.unwrap() else {
+            panic!("expected a problem report");
+        };
+        assert_eq!(
+            bob.open(mediator.identity(), &reply).await.body["code"],
+            "e.m.trust.unauthenticated"
+        );
     }
 }

@@ -14,9 +14,10 @@ tasks:
     silent: true
 
   init:
-    desc: Create .env from .env.example (an existing .env is left untouched)
+    desc: Create .env from .env.example with a fresh TURN secret (an existing .env is left untouched)
     cmds:
       - cp .env.example .env
+      - sed -i.bak "s/^ALMENA_TURN_SECRET=$/ALMENA_TURN_SECRET=$(openssl rand -hex 32)/" .env && rm .env.bak
     status:
       - test -f .env
 
@@ -24,6 +25,11 @@ tasks:
     desc: Start Redis in Docker (for task dev), reachable on 127.0.0.1
     cmds:
       - docker compose up --detach --wait redis
+
+  turn:
+    desc: Start the TURN relay (coturn) in Docker, for task dev and dev:memory
+    cmds:
+      - docker compose --profile turn up --detach coturn
 
   dev:
     desc: Run the mediator locally with readable debug logs (starts Redis in Docker)
@@ -135,6 +141,11 @@ tasks:
     cmds:
       - docker compose exec mediator almena-mediator rotate-keys
       - docker compose restart mediator
+
+  logs:turn:
+    desc: Follow the TURN relay's container logs
+    cmds:
+      - docker compose logs --follow coturn
 
   logs:
     desc: Follow the mediator's container logs

@@ -1,6 +1,6 @@
 # Almena Mediator Specification
 
-Version: draft 1 (2026-09-25) · Status: describes `almena-mediator` as implemented (phases 1–5, Appendix I).
+Version: draft 1 (2026-09-25) · Status: describes `almena-mediator` as implemented (phases 1–6, Appendix I).
 
 This document specifies the Almena Mediator as a profile of, and a set of extensions to, [DIDComm Messaging v2.0][didcomm]. It does not restate DIDComm: wherever a behaviour is the one the referenced specification defines, it says so and points at it. What it does spell out is what Almena adds, restricts, interprets or leaves out.
 
@@ -10,10 +10,10 @@ The key words MUST, MUST NOT, SHOULD, SHOULD NOT and MAY are to be interpreted a
 
 ## 1. Scope
 
-The Almena Mediator is a **pure mediator**: a mailbox that accepts DIDComm encrypted envelopes for the wallets it serves, queues them while those wallets are offline, and hands them over when they connect. It also relays envelopes for wallets mediated elsewhere and wakes mobile wallets with content-free push notifications.
+The Almena Mediator is a **pure mediator**: a mailbox that accepts DIDComm encrypted envelopes for the wallets it serves, queues them while those wallets are offline, and hands them over when they connect. It also relays envelopes for wallets mediated elsewhere, wakes mobile wallets with content-free push notifications, and gives its wallets credentials for a TURN relay so that their calls can be relayed.
 
-- It MUST NOT decrypt messages addressed to anyone but itself. The only messages it opens are the administrative ones wallets send *to the mediator* (mediation, pickup, device registration, ping, feature discovery).
-- Out of scope: message content and wallet-to-wallet protocols (Basic Message, chat), groups, user directories, a registry of mediators.
+- It MUST NOT decrypt messages addressed to anyone but itself. The only messages it opens are the administrative ones wallets send *to the mediator* (mediation, pickup, device registration, TURN credentials, ping, feature discovery).
+- Out of scope: message content and wallet-to-wallet protocols (Basic Message, chat, call signalling), the media of calls, groups, user directories, a registry of mediators.
 
 ## 2. Sources
 
@@ -36,10 +36,14 @@ The Almena Mediator is a **pure mediator**: a mailbox that accepts DIDComm encry
 | [FCM] | [Aries RFC 0734 Push Notifications FCM][rfc0734] | Device registration, FCM. Written for DIDComm v1; adapted in §6.2. |
 | [APNs] | [Aries RFC 0699 Push Notifications APNs][rfc0699] | Device registration, APNs. Written for DIDComm v1; adapted in §6.2. |
 | [Ack] | [Aries RFC 0015 ACKs][rfc0015] | The `ack` the push protocols answer with. |
+| [TURN] | [RFC 8656][rfc8656], Traversal Using Relays around NAT | The relay the credentials of §6.9 are for. |
+| [TURN-REST] | [A REST API for Access to TURN Services, draft-uberti-behave-turn-rest-00][turnrest] | The form of those credentials (§6.9). An expired Internet-Draft, but the mechanism TURN servers implement (coturn's `use-auth-secret`). |
 
 ### 2.2 Informative
 
 - [Firebase Cloud Messaging HTTP v1 API][fcmapi] and [Apple Push Notification service][apnsapi] — the push back-ends.
+- [WebRTC: Real-Time Communication in Browsers][webrtc] (W3C Recommendation) — the API wallets place calls with; the credentials of §6.9 have the shape of its `RTCIceServer`. The calls themselves are wallet to wallet and not specified here.
+- [coturn][coturn] — the TURN server `compose.yml` runs.
 - Implementations used for interoperability testing (§10): [didcomm-rust][sicpa] (SICPA), [affinidi-messaging-didcomm][affinidi] (DIDComm v2.1), [Veramo][veramo].
 - [RustCrypto][rustcrypto] — the primitives `almena-didcomm` is built on. No JOSE or DIDComm library is used.
 
@@ -257,7 +261,38 @@ When a `forward`'s `next` is not registered here, the mediator routes the payloa
 
 Every outbound URL comes from a DID document, i.e. from strangers. Outbound HTTP (federation, `did:web`) MUST use `https`, MUST NOT target IP-literal hosts, and MUST NOT connect to private, loopback, link-local, CGNAT or documentation addresses — checked at connect time, so DNS rebinding cannot bypass it. `ALMENA_OUTBOUND_ALLOW_INSECURE=true` lifts the guard for local multi-mediator setups only.
 
-### 6.9 Problem codes
+### 6.9 TURN credentials
+
+Wallets place calls with [WebRTC][webrtc] and relay all their media through TURN ([TURN]), so that neither side learns the other's IP address. Each wallet uses the TURN server of its own mediator, whose operator already sees its traffic. This protocol, Almena's own, hands a mediated wallet short-lived credentials for it:
+
+| Protocol | PIURI | Messages |
+|---|---|---|
+| TURN 1.0 | `https://almena.network/protocols/turn/1.0` | `credentials-request`, `credentials` |
+
+The PIURI is a fixed name, the same for every deployment; only the TURN server's address varies (`ALMENA_TURN_URLS`).
+
+- `credentials-request`, body `{}`: authcrypted and with a granted mediation, like §6.1.
+- Answered with `credentials`:
+
+```json
+{
+  "ice_servers": [{
+    "urls": ["turn:turn.example.com:3478?transport=udp", "turn:turn.example.com:3478?transport=tcp"],
+    "username": "1760000000:9f3a61c2d4e5b708",
+    "credential": "base64(HMAC-SHA1(secret, username))"
+  }],
+  "ttl": 86400
+}
+```
+
+- Credentials follow [TURN-REST]: `username` is `<expiry, epoch seconds>:<id>`, `credential` is the base64 HMAC-SHA1 of `username` under the secret the mediator shares with the TURN server. Nothing is stored: the TURN server checks them on its own. The `id` is random per request, so the TURN server's records cannot be joined to a DID.
+- Each entry of `ice_servers` has the members of WebRTC's `RTCIceServer` and can be handed to it as it is. `ttl` is in seconds.
+- Offered only when the mediator is configured with a TURN server; otherwise `e.m.msg.unsupported-type`, and Discover Features does not disclose it (role `server` when it does).
+- A wallet asks before each call; credentials must outlast the call, since the TURN server checks them again on every refresh.
+
+The TURN server MUST NOT relay to private, loopback, link-local or CGNAT addresses other than its own relay address: wallets relay only to each other's relays, and anything else would open the operator's network to strangers.
+
+### 6.10 Problem codes
 
 Problem reports follow [DIDComm] §Problem Reports: they open a child thread of the trigger (`pthid` = the trigger's `thid`) and carry `ack: [<trigger id>]`. Codes used:
 
@@ -266,8 +301,8 @@ Problem reports follow [DIDComm] §Problem Reports: they open a child thread of 
 | `e.m.msg.unsupported-type` | Almena | Type the mediator does not handle (`args`: the type). |
 | `e.m.msg.invalid-body` | Almena | Body without the shape its type requires. |
 | `e.m.req.time.expired` | Almena | `expires_time` has passed. |
-| `e.m.trust.unauthenticated` | Almena | Mediation, pickup or push message not authcrypted. |
-| `e.m.req.no-mediation` | Almena | Pickup or push message without a granted mediation. |
+| `e.m.trust.unauthenticated` | Almena | Mediation, pickup, push or TURN message not authcrypted. |
+| `e.m.req.no-mediation` | Almena | Pickup, push or TURN message without a granted mediation. |
 | `e.m.msg.unknown-recipient` | Almena | `recipient_did` is not one of the mediation's. |
 | `e.m.live-mode-not-supported` | [Pickup] | `live_delivery: true` requested over HTTP. |
 
@@ -316,7 +351,7 @@ TLS is terminated by a reverse proxy; the mediator speaks plain HTTP.
 
 `disclose` answers with the features matching the queries (`*` is a wildcard; unknown feature types match nothing):
 
-- `protocol`: every PIURI of §9 the mediator offers, with roles where they apply (`receiver`, `responder`, `mediator`, `notification-sender`);
+- `protocol`: every PIURI of §9 the mediator offers, with roles where they apply (`receiver`, `responder`, `mediator`, `notification-sender`, `server`);
 - `header`: `return_route`;
 - `constraint`: `max_receive_bytes` = `ALMENA_MAX_MESSAGE_BYTES`.
 
@@ -326,7 +361,7 @@ TLS is terminated by a reverse proxy; the mediator speaks plain HTTP.
 |---|---|---|---|
 | Trust Ping 2.0 | `https://didcomm.org/trust-ping/2.0` | [DIDComm] | None; `ping-response` unless `response_requested: false`. |
 | Discover Features 2.0 | `https://didcomm.org/discover-features/2.0` | [DIDComm] | §8, D9. |
-| Report Problem 2.0 | `https://didcomm.org/report-problem/2.0` | [DIDComm] | §6.9. |
+| Report Problem 2.0 | `https://didcomm.org/report-problem/2.0` | [DIDComm] | §6.10. |
 | `return_route` | header | [ReturnRoute] | D5, D6. |
 | Coordinate Mediation 3.0 | `https://didcomm.org/coordinate-mediation/3.0` | [CoordMed] | §6.1, §6.2. |
 | Routing 2.0 | `https://didcomm.org/routing/2.0` | [Routing] | D8, §6.7. |
@@ -335,6 +370,7 @@ TLS is terminated by a reverse proxy; the mediator speaks plain HTTP.
 | Push Notifications FCM 1.0 | `https://didcomm.org/push-notifications-fcm/1.0` | [FCM] | §6.3. |
 | Push Notifications APNs 1.0 | `https://didcomm.org/push-notifications-apns/1.0` | [APNs] | §6.3. |
 | ACK (notification) 1.0 | `https://didcomm.org/notification/1.0` | [Ack] | Emitted only, as the answer to `set-device-info`. |
+| TURN 1.0 | `https://almena.network/protocols/turn/1.0` | This document | §6.9. |
 
 ## 10. Conformance evidence
 
@@ -359,6 +395,7 @@ Limits are operator settings, not protocol: any wallet may request mediation, an
 | `ALMENA_MEDIATION_TTL` | 90 days | A mediation with no authenticated mediation, pickup or push message for this long is removed, with its DIDs, queue and devices. |
 | `ALMENA_RATE_LIMIT` | 60 / min / client IP | `429`, or WebSocket close `1008`. |
 | `ALMENA_PUSH_MIN_INTERVAL` | 60 s | §6.4. |
+| `ALMENA_TURN_TTL` | 1 day | Lifetime of TURN credentials (§6.9). |
 
 The full list is in [.env.example](.env.example).
 
@@ -367,6 +404,7 @@ The full list is in [.env.example](.env.example).
 - **Content.** The mediator stores and forwards opaque envelopes encrypted to wallets. It learns recipient DIDs, sizes and timing, not content or senders of forwarded messages.
 - **Queue ownership.** Authcrypt on every administrative message (§6.1) and possession proofs (§6.2) bind queues to wallets that control the DIDs.
 - **Push.** Payloads carry nothing linkable to a DID, a sender or a message (§6.4). Push providers learn only that a device is being woken.
+- **Calls.** Media is DTLS-SRTP between the two wallets; the TURN server relays it without being able to read it. It sees both wallets' IP addresses and the timing and volume of their calls, as the mediator already sees their messages' — which is why each wallet uses its own mediator's TURN server. TURN is offered over UDP and TCP without TLS: a network observer can see that a wallet uses TURN, but not what it carries.
 - **Metrics.** Aggregate only — no DIDs, nothing per mediation — and served on a separate listener.
 - **Outbound requests.** Guarded against SSRF (§6.8); `links` attachments refused (D8).
 - **Keys.** The mediator's private keys are its identity; rotation is immediate (§5.3).
@@ -376,6 +414,7 @@ The full list is in [.env.example](.env.example).
 - DIDComm v1 envelopes; DIDComm v2.1 features beyond what §3.3 accepts on read.
 - `forward` rewrapping, `delay_milli`, `links` attachments.
 - A push gateway for third-party mediators (§6.4).
+- TURN over TLS (`turns:`), and wake-ups for incoming calls (a call only rings on a wallet that is online).
 - Live delivery across several mediator instances (sessions are per process).
 - Message content protocols, groups, directories, a mediator registry.
 
@@ -410,6 +449,8 @@ Items were either **decided** explicitly or are **proposed** defaults that stand
 | **One queue per mediation** | Queue ids unique across a wallet's DIDs. | §6.1 |
 | **One instance** for now | Live sessions are in process. | App. E |
 | **Metrics on their own listener**, aggregate only | Never exposed through the public proxy; no DIDs. | App. H |
+| **TURN credentials from the mediator**, relay always | Calls never expose a wallet's IP to its contact; the operator who relays is the one the wallet already trusts; no second account. (2026-09-25) | §6.9 |
+| **Fixed Almena PIURIs** (`https://almena.network/protocols/…`) | No DIDComm protocol exists for this; a PIURI is a name compared as text, so it cannot vary per environment. (2026-09-25) | §6.9 |
 
 ## Appendix B. Code layout and library
 
@@ -489,6 +530,10 @@ Settings beyond §11, all `ALMENA_*` environment variables (full list in [.env.e
 | `ALMENA_APNS_KEY_PATH`, `ALMENA_APNS_KEY_ID`, `ALMENA_APNS_TEAM_ID`, `ALMENA_APNS_TOPIC` | — | APNs `.p8` key, its id, the team id and the app's bundle id; all four or none. |
 | `ALMENA_APNS_SANDBOX` | `false` | Push to the APNs sandbox. |
 | `ALMENA_METRICS_ADDR` | — | Metrics listener (App. H); off when unset. |
+| `ALMENA_TURN_URLS`, `ALMENA_TURN_SECRET` | — | TURN URIs given to wallets (comma-separated `turn:`/`turns:`) and the secret shared with the TURN server; both or neither (§6.9). |
+| `ALMENA_TURN_TTL` | `86400` | §6.9. |
+
+The TURN server is coturn, a service of `compose.yml` under the `turn` profile (`COMPOSE_PROFILES=turn`), with `use-auth-secret` and the same secret. Its own settings: `ALMENA_TURN_EXTERNAL_IP` (the address relayed candidates carry: the host's public IP, or its LAN or loopback address in development), `ALMENA_TURN_PORT` (3478, UDP and TCP), `ALMENA_TURN_MIN_PORT`–`ALMENA_TURN_MAX_PORT` (the UDP relay ports, one per call leg) and `ALMENA_TURN_REALM`. It runs alone on its own Compose network at a fixed address (`172.31.254.2`), and refuses to relay into private networks except to that address and its external one (§6.9): two wallets on the same TURN server reach each other through its relay address, and nothing else on the host is reachable through it. Only UDP relays are allocated (`no-tcp-relay`).
 
 ## Appendix H. Metrics
 
@@ -504,6 +549,7 @@ Prometheus text format on `ALMENA_METRICS_ADDR`, hand-written counters. Aggregat
 | `almena_pushes_total` | `service` (`fcm`, `apns`), `result` (`delivered`, `invalid_token`, `failed`) |
 | `almena_live_sessions` (gauge) | — |
 | `almena_mediations_granted_total`, `almena_mediations_removed_total` | — |
+| `almena_turn_credentials_total` | — |
 
 ## Appendix I. Phases
 
@@ -512,6 +558,7 @@ Prometheus text format on `ALMENA_METRICS_ADDR`, hand-written counters. Aggregat
 3. ✅ **Mediation** — Coordinate Mediation 3.0, `forward`, Message Pickup 3.0 (polling), limits.
 4. ✅ **Live and network** — WebSocket and live delivery, Out-of-Band invitations, federation.
 5. ✅ **Push** — FCM and APNs protocols, token storage, coalesced wake-ups, direct mode. The push gateway (App. F) waits for third-party mediators.
+6. ✅ **Calls** — TURN credentials (§6.9) and coturn in `compose.yml`. Wake-ups for incoming calls come later.
 
 Each phase ends with `task check` green and this document updated.
 
@@ -543,3 +590,7 @@ Each phase ends with `task check` green and this document updated.
 [affinidi]: https://github.com/affinidi/affinidi-tdk-rs
 [veramo]: https://veramo.io
 [rustcrypto]: https://github.com/RustCrypto
+[rfc8656]: https://www.rfc-editor.org/rfc/rfc8656
+[turnrest]: https://datatracker.ietf.org/doc/html/draft-uberti-behave-turn-rest-00
+[webrtc]: https://www.w3.org/TR/webrtc/
+[coturn]: https://github.com/coturn/coturn

@@ -32,6 +32,10 @@ services:
       ALMENA_APNS_TEAM_ID: ${ALMENA_APNS_TEAM_ID:-}
       ALMENA_APNS_TOPIC: ${ALMENA_APNS_TOPIC:-}
       ALMENA_APNS_SANDBOX: ${ALMENA_APNS_SANDBOX:-false}
+      # TURN credentials for calls (the coturn service below); unset: off.
+      ALMENA_TURN_URLS: ${ALMENA_TURN_URLS:-}
+      ALMENA_TURN_SECRET: ${ALMENA_TURN_SECRET:-}
+      ALMENA_TURN_TTL: ${ALMENA_TURN_TTL:-86400}
       # Not published: scrape it from the Compose network (e.g. 0.0.0.0:9090).
       ALMENA_METRICS_ADDR: ${ALMENA_METRICS_ADDR:-}
       ALMENA_LOG_FORMAT: ${ALMENA_LOG_FORMAT:-json}
@@ -76,6 +80,56 @@ services:
       mediator:
         condition: service_healthy
 
+  coturn:
+    # TURN relay for wallets' calls (SPEC.md §6.9). Only with the `turn`
+    # profile (COMPOSE_PROFILES=turn in .env): it needs ALMENA_TURN_SECRET.
+    image: coturn/coturn:4.18
+    profiles: [turn]
+    restart: unless-stopped
+    command:
+      - -n
+      - --log-file=stdout
+      # Time-limited credentials from the mediator (TURN REST API).
+      - --use-auth-secret
+      - --static-auth-secret=${ALMENA_TURN_SECRET:-}
+      - --realm=${ALMENA_TURN_REALM:-almena.network}
+      - --listening-port=3478
+      # Media is DTLS-SRTP end to end; TURN over TLS is not offered yet.
+      - --no-tls
+      # WebRTC relays over UDP only: no TCP relays, which would make this a
+      # TCP proxy to anywhere.
+      - --no-tcp-relay
+      - --fingerprint
+      - --min-port=${ALMENA_TURN_MIN_PORT:-49160}
+      - --max-port=${ALMENA_TURN_MAX_PORT:-49200}
+      # The address relayed candidates carry: this host as wallets reach it.
+      - --external-ip=${ALMENA_TURN_EXTERNAL_IP:-}
+      # Its own address on its own network (below): the one it relays from.
+      - --relay-ip=172.31.254.2
+      # Wallets relay to each other's relays only: never into private
+      # networks (Docker's included), except to our own relays — which
+      # coturn reaches by its relay address when two wallets share it.
+      - --no-multicast-peers
+      - --denied-peer-ip=0.0.0.0-0.255.255.255
+      - --denied-peer-ip=10.0.0.0-10.255.255.255
+      - --denied-peer-ip=100.64.0.0-100.127.255.255
+      - --denied-peer-ip=127.0.0.0-127.255.255.255
+      - --denied-peer-ip=169.254.0.0-169.254.255.255
+      - --denied-peer-ip=172.16.0.0-172.31.255.255
+      - --denied-peer-ip=192.168.0.0-192.168.255.255
+      - --denied-peer-ip=::1
+      - --denied-peer-ip=fc00::-fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+      - --denied-peer-ip=fe80::-febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+      - --allowed-peer-ip=${ALMENA_TURN_EXTERNAL_IP:-}
+      - --allowed-peer-ip=172.31.254.2
+    networks:
+      turn:
+        ipv4_address: 172.31.254.2
+    ports:
+      - "${ALMENA_TURN_PORT:-3478}:3478/udp"
+      - "${ALMENA_TURN_PORT:-3478}:3478/tcp"
+      - "${ALMENA_TURN_MIN_PORT:-49160}-${ALMENA_TURN_MAX_PORT:-49200}:${ALMENA_TURN_MIN_PORT:-49160}-${ALMENA_TURN_MAX_PORT:-49200}/udp"
+
   redis:
     image: redis:8-alpine
     restart: unless-stopped
@@ -102,6 +156,15 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+
+networks:
+  # coturn alone, at a fixed address, so that it can be allowed as a peer
+  # (two wallets on one TURN server relay to each other through it) while
+  # the rest of Docker's addresses, the mediator's and Redis's, are not.
+  turn:
+    ipam:
+      config:
+        - subnet: 172.31.254.0/29
 
 volumes:
   mediator-data:

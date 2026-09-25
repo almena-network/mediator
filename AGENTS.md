@@ -1,7 +1,7 @@
 # almena-mediator — notes for contributors and agents
 
 Server of Almena Network, a decentralised messaging platform based on DIDComm Messaging v2.0
-(https://identity.foundation/didcomm-messaging/spec/v2.0/). DIDs follow W3C DID (https://www.w3.org/TR/did/). Phases 1–5 of SPEC.md (Appendix I) are done: the DIDComm library, the mediator skeleton, mediation, live delivery / invitations / federation, and push wake-ups.
+(https://identity.foundation/didcomm-messaging/spec/v2.0/). DIDs follow W3C DID (https://www.w3.org/TR/did/). Phases 1–6 of SPEC.md (Appendix I) are done: the DIDComm library, the mediator skeleton, mediation, live delivery / invitations / federation, push wake-ups, and TURN credentials for calls.
 
 This project is independent: it has its own Docker Compose file, env file and tooling.
 It shares nothing with `../wallet` except the protocol; the wallet may later depend on the `almena-didcomm` crate (see SPEC.md, Appendix B).
@@ -17,7 +17,7 @@ Cargo workspace:
 - `crates/mediator/` — `almena-mediator`: the service.
   - `config` reads `ALMENA_*` env vars; `identity` holds the mediator's `did:web`, keys (`ALMENA_KEYS_PATH`) and DID document.
   - `store/`: the `Store` trait with Redis and in-memory implementations, and a contract test both must pass.
-  - `dispatch/`: unpacks what reaches `/didcomm` or `/ws` and dispatches — `protocols.rs` (Trust Ping, Discover Features, problem reports), `mediation.rs` (Coordinate Mediation, `forward`), `pickup.rs` (Message Pickup), `live.rs` (live-delivery sessions), `relay.rs` (forwarding to other mediators), `devices.rs` (push protocols: device registration).
+  - `dispatch/`: unpacks what reaches `/didcomm` or `/ws` and dispatches — `protocols.rs` (Trust Ping, Discover Features, problem reports), `mediation.rs` (Coordinate Mediation, `forward`), `pickup.rs` (Message Pickup), `live.rs` (live-delivery sessions), `relay.rs` (forwarding to other mediators), `devices.rs` (push protocols: device registration), `turn.rs` (TURN 1.0, Almena's own: time-limited credentials for the coturn relay, nothing stored).
   - `push/`: wake-ups through FCM (`fcm.rs`) and APNs (`apns.rs`), coalescing, the `Pusher` trait.
   - `transport.rs`: outbound HTTPS with the SSRF guard, and the `did:web` resolver. `oob.rs`: the Out-of-Band invitation.
   - `routes` is the axum router: HTTP and WebSocket endpoints, rate limit, HTTP status mapping.
@@ -25,7 +25,7 @@ Cargo workspace:
   - `metrics.rs`: Prometheus counters, served by their own listener (`ALMENA_METRICS_ADDR`), not by the router.
   - `src/main.rs`: logging, start-up, graceful shutdown, `healthcheck` subcommand. `testing.rs` has a test mediator and wallets.
   - `examples/smoke.rs`: end-to-end client against a running mediator (`task smoke`).
-- `Dockerfile`, `compose.yml` (mediator + Redis), `.env.example` — container build and local run. `data/` (local keys) and `caddy/` (Caddy's certificates and ACME account) are git-ignored.
+- `Dockerfile`, `compose.yml` (mediator + Redis + Caddy, and coturn under the `turn` profile), `.env.example` — container build and local run. `data/` (local keys) and `caddy/` (Caddy's certificates and ACME account) are git-ignored.
 - `SPEC.md` — the Almena Mediator specification: the DIDComm v2.0 profile, deviations and Almena's own extensions, with their sources; its appendices hold the design (decisions, code layout, storage, scaling, metrics, phases). Read it before DIDComm work and keep it current.
 
 ## Rules

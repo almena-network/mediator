@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::net::SocketAddr;
 
 use almena_mediator::config::PushMode;
+use almena_mediator::dispatch::turn::TurnServer;
 use almena_mediator::dispatch::{Limits, Mediator};
 use almena_mediator::identity::Identity;
 use almena_mediator::push::{Apns, DirectPusher, Fcm, Pusher};
@@ -77,6 +78,14 @@ async fn main() -> Result<()> {
         let services: Vec<_> = pusher.services().iter().map(|s| s.as_str()).collect();
         tracing::info!(?services, "push wake-ups on (direct)");
         mediator = mediator.with_pusher(Arc::new(pusher));
+    }
+    if let Some(turn) = &config.turn {
+        tracing::info!(urls = ?turn.urls, ttl = turn.ttl_secs, "TURN credentials on");
+        mediator = mediator.with_turn(TurnServer::new(
+            turn.urls.clone(),
+            &turn.secret.0,
+            turn.ttl_secs,
+        ));
     }
     mediator.start_relay_retries();
     mediator.start_cleanup();
